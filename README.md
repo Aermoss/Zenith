@@ -1,2 +1,2 @@
 # Zenith
-A 64-bit kernel written in [Zircon](https://github.com/Aermoss/Zircon) and Assembly.
+An experimental 64-bit kernel written in Assembly and [Zircon](https://github.com/Aermoss/Zircon).

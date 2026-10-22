@@ -1,0 +1,251 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "src/Devices.zir", "src/Console.zir", "src/Strings.zir", "src/Memory.zir" : *]
+
+const LINE_LENGTH: usize = 128;
+const DUMP_LENGTH: u32 = 64;
+
+fn CommandHelp() {
+    WriteLine("help                     show the commands");
+    WriteLine("echo <text>              print the text");
+    WriteLine("uptime                   show the time since boot");
+    WriteLine("clear                    clear the screen");
+    WriteLine("info                     show the memory map");
+    WriteLine("peek <address>           read a word");
+    WriteLine("poke <address> <value>   write a word");
+    WriteLine("dump <address> [length]  show memory as bytes");
+    WriteLine("heap                     show how much of the heap is used");
+    WriteLine("alloc <size>             allocate memory from the heap");
+    WriteLine("free <address>           free memory allocated with alloc");
+}
+
+fn WriteRange(name: *i8, start: u32, end: u32) {
+    Write(name);
+    WriteHexadecimal(start);
+    Write(" - ");
+    WriteHexadecimal(end);
+    WriteCharacter('\n');
+}
+
+fn CommandInfo() {
+    Write("Clock:   ");
+    WriteInteger(CLK_FREQ / 1000000);
+    WriteLine(" MHz");
+    WriteRange("Stack:   ", BRAM_START, BRAM_END);
+    WriteRange("Kernel:  ", SDRAM_START, kernel_end);
+    WriteRange("Heap:    ", heap_start, heap_end);
+    WriteRange("Flash:   ", FLASH_START, FLASH_END);
+}
+
+fn IsWordAddress(address: u32) -> bool {
+    if (address & 3) != 0 {
+        WriteLine("The address must be a multiple of 4.");
+        return false;
+    }
+
+    true
+}
+
+fn CommandPeek(arguments: *i8) {
+    let mut address: u32 = 0;
+    let rest = ParseNumber(arguments, &mut address);
+
+    if rest == null || !AtEnd(rest) {
+        WriteLine("Usage: peek <address>");
+        return;
+    }
+
+    if !IsWordAddress(address) {
+        return;
+    }
+
+    WriteHexadecimal(address);
+    Write(": ");
+    WriteHexadecimal(*(address as *u32));
+    WriteCharacter('\n');
+}
+
+fn CommandPoke(arguments: *i8) {
+    let mut address: u32 = 0;
+    let mut value: u32 = 0;
+    let mut rest = ParseNumber(arguments, &mut address);
+
+    if rest != null {
+        rest = ParseNumber(rest, &mut value);
+    }
+
+    if rest == null || !AtEnd(rest) {
+        WriteLine("Usage: poke <address> <value>");
+        return;
+    }
+
+    if !IsWordAddress(address) {
+        return;
+    }
+
+    *(address as *mut u32) = value;
+}
+
+fn CommandDump(arguments: *i8) {
+    let mut address: u32 = 0;
+    let mut length = DUMP_LENGTH;
+    let mut rest = ParseNumber(arguments, &mut address);
+
+    if rest != null && !AtEnd(rest) {
+        rest = ParseNumber(rest, &mut length);
+    }
+
+    if rest == null || !AtEnd(rest) {
+        WriteLine("Usage: dump <address> [length]");
+        return;
+    }
+
+    let end = address + length;
+    let mut line = address;
+
+    while line < end {
+        WriteHexadecimalDigits(line, 8);
+        Write(": ");
+        let mut i: u32 = 0;
+
+        while i < 16 {
+            if line + i < end {
+                WriteHexadecimalDigits(*((line + i) as *u8) as u32, 2);
+                WriteCharacter(' ');
+            } else {
+                Write("   ");
+            }
+
+            i += 1;
+        }
+
+        Write(" ");
+        i = 0;
+
+        while i < 16 && line + i < end {
+            let character = *((line + i) as *i8);
+
+            if character >= ' ' && character <= '~' {
+                WriteCharacter(character);
+            } else {
+                WriteCharacter('.');
+            }
+
+            i += 1;
+        }
+
+        WriteCharacter('\n');
+        line += 16;
+    }
+}
+
+fn CommandHeap() {
+    let mut used: u32 = 0;
+    let mut free: u32 = 0;
+    let mut largest_free: u32 = 0;
+    GetHeapStatistics(&mut used, &mut free, &mut largest_free);
+
+    WriteRange("Heap:    ", heap_start, heap_end);
+    Write("Used:    ");
+    WriteInteger(used);
+    WriteLine(" bytes");
+    Write("Free:    ");
+    WriteInteger(free);
+    Write(" bytes, the largest block is ");
+    WriteInteger(largest_free);
+    WriteLine(" bytes");
+}
+
+fn CommandAlloc(arguments: *i8) {
+    let mut size: u32 = 0;
+    let rest = ParseNumber(arguments, &mut size);
+
+    if rest == null || !AtEnd(rest) {
+        WriteLine("Usage: alloc <size>");
+        return;
+    }
+
+    let pointer = Allocate(size);
+
+    if pointer == null {
+        WriteLine("Not enough memory.");
+        return;
+    }
+
+    Write("Allocated ");
+    WriteInteger(size);
+    Write(" bytes at ");
+    WriteHexadecimal(pointer as u32);
+    WriteCharacter('\n');
+}
+
+fn CommandFree(arguments: *i8) {
+    let mut address: u32 = 0;
+    let rest = ParseNumber(arguments, &mut address);
+
+    if rest == null || !AtEnd(rest) {
+        WriteLine("Usage: free <address>");
+        return;
+    }
+
+    if !Free(address as *mut u8) {
+        WriteLine("There is no allocation at that address.");
+    }
+}
+
+fn RunCommand(line: *i8) {
+    let mut arguments = line;
+
+    if AtEnd(line) {
+    } else if ParseCommand(line, "help", &mut arguments) {
+        CommandHelp();
+    } else if ParseCommand(line, "echo", &mut arguments) {
+        WriteLine(arguments);
+    } else if ParseCommand(line, "uptime", &mut arguments) {
+        WriteInteger(GetTime());
+        WriteLine(" ms");
+    } else if ParseCommand(line, "clear", &mut arguments) {
+        Write("\x1B[2J\x1B[H");
+    } else if ParseCommand(line, "info", &mut arguments) {
+        CommandInfo();
+    } else if ParseCommand(line, "peek", &mut arguments) {
+        CommandPeek(arguments);
+    } else if ParseCommand(line, "poke", &mut arguments) {
+        CommandPoke(arguments);
+    } else if ParseCommand(line, "dump", &mut arguments) {
+        CommandDump(arguments);
+    } else if ParseCommand(line, "heap", &mut arguments) {
+        CommandHeap();
+    } else if ParseCommand(line, "alloc", &mut arguments) {
+        CommandAlloc(arguments);
+    } else if ParseCommand(line, "free", &mut arguments) {
+        CommandFree(arguments);
+    } else {
+        Write("Unknown command: ");
+        WriteLine(line);
+    }
+}
+
+fn RunShell() {
+    let mut line: [i8; LINE_LENGTH];
+
+    loop {
+        Write("zenith> ");
+        ReadLine(&mut line[0], LINE_LENGTH);
+        RunCommand(&line[0] as *i8);
+    }
+}

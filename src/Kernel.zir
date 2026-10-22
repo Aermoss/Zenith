@@ -14,169 +14,28 @@
  * limitations under the License.
  */
 
-const CLK_FREQ: u32 = 54000000;
-const BAUD_RATE: u32 = 115200;
+#[include "src/Devices.zir", "src/Console.zir", "src/Memory.zir", "src/Shell.zir" : *]
 
-const UART_DATA: u32 = 0xFFFF;
-const UART_STATUS: u32 = 0xFFFC;
-const UART_DIVISOR: u32 = 0xFFF8;
-const BUTTON: u32 = 0xFFF4;
-const LEDS: u32 = 0xFFF0;
-const MS_COUNTER: u32 = 0xFFEC;
-const CYCLE_COUNTER: u32 = 0xFFE8;
-const INSTRUCTION_COUNTER: u32 = 0xFFE4;
-
-const LINE_LENGTH: usize = 128;
-
-fn SetBaudRate(baud: u32) {
-    *(UART_DIVISOR as *mut u32) = CLK_FREQ / baud;
-}
-
-fn WriteCharacter(character: i8) {
-    while (*(UART_STATUS as *u32) & 2) != 0 {}
-    *(UART_DATA as *mut i8) = character;
-}
-
-fn Write(mut string: *i8) {
-    while *string != '\0' {
-        WriteCharacter(*string);
-        string += 1;
-    }
-}
-
-fn WriteLine(string: *i8) {
-    Write(string);
-    WriteCharacter('\n');
-}
-
-fn WriteInteger(value: u32) {
-    if value >= 10 {
-        WriteInteger(value / 10);
-    }
-
-    WriteCharacter(48 + (value % 10) as i8);
-}
-
-fn WriteHexadecimal(value: u32) {
-    Write("0x");
-    let mut i: u32 = 7;
-
-    loop {
-        let nibble = ((value >> (i * 4)) & 0xF) as u8;
-
-        if nibble < 10 {
-            WriteCharacter('0' + nibble as i8);
-        } else {
-            WriteCharacter('A' + (nibble as i8 - 10));
-        }
-
-        if i == 0 {
-            break;
-        } i -= 1;
-    }
-}
-
-fn HasCharacter() -> bool {
-    (*(UART_STATUS as *u32) & 1) != 0
-}
-
-fn ReadCharacter() -> i8 {
-    while !HasCharacter() {}
-    *(UART_DATA as *u32) as i8
-}
-
-fn ReadLine(buffer: *mut i8, length: usize) -> usize {
-    let mut count: usize = 0;
-    let mut character = ReadCharacter();
-
-    while character != '\r' && character != '\n' {
-        if character == '\x08' || character == '\x7F' {
-            if count > 0 {
-                count -= 1;
-                Write("\x08 \x08");
-            }
-        } else if character >= ' ' && count < length - 1 {
-            buffer[count] = character;
-            count += 1;
-            WriteCharacter(character);
-        }
-
-        character = ReadCharacter();
-    }
-
-    WriteCharacter('\n');
-    buffer[count] = '\0';
-    count
-}
-
-fn GetTime() -> u32 {
-    *(MS_COUNTER as *u32)
-}
-
-fn SetLEDs(leds: i8) {
-    *(LEDS as *mut i8) = leds;
-}
-
-fn Equals(mut left: *i8, mut right: *i8) -> bool {
-    while *left == *right {
-        if *left == '\0' {
-            return true;
-        }
-
-        left += 1;
-        right += 1;
-    }
-
-    false
-}
-
-fn StartsWith(mut string: *i8, mut prefix: *i8) -> bool {
-    while *prefix != '\0' {
-        if *string != *prefix {
-            return false;
-        }
-
-        string += 1;
-        prefix += 1;
-    }
-
-    true
-}
-
-fn RunCommand(command: *i8) {
-    if Equals(command, "") {
-    } else if Equals(command, "help") {
-        WriteLine("help      show the commands");
-        WriteLine("echo      print the text after it");
-        WriteLine("uptime    show the time since boot");
-        WriteLine("clear     clear the screen");
-    } else if Equals(command, "echo") {
-        WriteLine("");
-    } else if StartsWith(command, "echo ") {
-        WriteLine(command + 5);
-    } else if Equals(command, "uptime") {
-        WriteInteger(GetTime());
-        WriteLine(" ms");
-    } else if Equals(command, "clear") {
-        Write("\x1B[2J\x1B[H");
-    } else {
-        Write("Unknown command: ");
-        WriteLine(command);
-    }
+@track_caller
+fn Panic(message: *i8) {
+    let (file, row, column) = caller_location();
+    Write("Panicked at ");
+    Write(file);
+    WriteCharacter(':');
+    WriteInteger(row);
+    WriteCharacter(':');
+    WriteInteger(column);
+    Write(": ");
+    WriteLine(message);
+    loop {}
 }
 
 @nomangle
-fn Main() {
+fn Main(image_end: u32) {
     SetBaudRate(BAUD_RATE);
     SetLEDs(0x3F);
-
+    InitializeMemory(image_end);
     WriteLine("Zenith kernel started.");
     WriteLine("Type help to see the commands.");
-    let mut line: [i8; LINE_LENGTH];
-
-    loop {
-        Write("zenith> ");
-        ReadLine(&mut line[0], LINE_LENGTH);
-        RunCommand(&line[0] as *i8);
-    }
+    RunShell();
 }

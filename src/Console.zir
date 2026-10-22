@@ -1,0 +1,210 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "src/Devices.zir" : *]
+
+const BAUD_RATE: u32 = 115200;
+
+fn WriteCharacter(character: i8) {
+    while (*(UART_STATUS as *u32) & 2) != 0 {}
+    *(UART_DATA as *mut i8) = character;
+}
+
+fn Write(mut string: *i8) {
+    while *string != '\0' {
+        WriteCharacter(*string);
+        string += 1;
+    }
+}
+
+fn WriteLine(string: *i8) {
+    Write(string);
+    WriteCharacter('\n');
+}
+
+fn WriteInteger(value: u32) {
+    if value >= 10 {
+        WriteInteger(value / 10);
+    }
+
+    WriteCharacter(48 + (value % 10) as i8);
+}
+
+fn WriteHexadecimalDigits(value: u32, digits: u32) {
+    let mut i = digits;
+
+    while i > 0 {
+        i -= 1;
+        let nibble = ((value >> (i * 4)) & 0xF) as u8;
+
+        if nibble < 10 {
+            WriteCharacter('0' + nibble as i8);
+        } else {
+            WriteCharacter('A' + (nibble as i8 - 10));
+        }
+    }
+}
+
+fn WriteHexadecimal(value: u32) {
+    Write("0x");
+    WriteHexadecimalDigits(value, 8);
+}
+
+fn HasCharacter() -> bool {
+    (*(UART_STATUS as *u32) & 1) != 0
+}
+
+fn ReadCharacter() -> i8 {
+    while !HasCharacter() {}
+    *(UART_DATA as *u32) as i8
+}
+
+const KEY_HOME: i8 = '\x01';
+const KEY_LEFT: i8 = '\x02';
+const KEY_DELETE: i8 = '\x04';
+const KEY_END: i8 = '\x05';
+const KEY_RIGHT: i8 = '\x06';
+const KEY_DOWN: i8 = '\x0E';
+const KEY_UP: i8 = '\x10';
+
+fn ReadKey() -> i8 {
+    let character = ReadCharacter();
+
+    if character != '\x1B' {
+        return character;
+    }
+
+    let kind = ReadCharacter();
+
+    if kind != '[' && kind != 'O' {
+        return '\0';
+    }
+
+    let mut number: u32 = 0;
+    let mut first = true;
+    let mut code = ReadCharacter();
+
+    while (code >= '0' && code <= '9') || code == ';' {
+        if code == ';' {
+            first = false;
+        } else if first {
+            number = number * 10 + (code - '0') as u32;
+        }
+
+        code = ReadCharacter();
+    }
+
+    if code == 'A' {
+        return KEY_UP;
+    } else if code == 'B' {
+        return KEY_DOWN;
+    } else if code == 'C' {
+        return KEY_RIGHT;
+    } else if code == 'D' {
+        return KEY_LEFT;
+    } else if code == 'H' || (code == '~' && (number == 1 || number == 7)) {
+        return KEY_HOME;
+    } else if code == 'F' || (code == '~' && (number == 4 || number == 8)) {
+        return KEY_END;
+    } else if code == '~' && number == 3 {
+        return KEY_DELETE;
+    }
+
+    '\0'
+}
+
+fn WriteCharacters(buffer: *mut i8, start: usize, end: usize) {
+    let mut i = start;
+
+    while i < end {
+        WriteCharacter(buffer[i]);
+        i += 1;
+    }
+}
+
+fn MoveCursorLeft(count: usize) {
+    let mut i: usize = 0;
+
+    while i < count {
+        WriteCharacter('\x08');
+        i += 1;
+    }
+}
+
+fn InsertCharacter(buffer: *mut i8, cursor: usize, count: usize, character: i8) -> usize {
+    let mut i = count;
+
+    while i > cursor {
+        buffer[i] = buffer[i - 1];
+        i -= 1;
+    }
+
+    buffer[cursor] = character;
+    WriteCharacters(buffer, cursor, count + 1);
+    MoveCursorLeft(count - cursor);
+    count + 1
+}
+
+fn DeleteCharacter(buffer: *mut i8, cursor: usize, count: usize) -> usize {
+    let mut i = cursor;
+
+    while i < count - 1 {
+        buffer[i] = buffer[i + 1];
+        i += 1;
+    }
+
+    WriteCharacters(buffer, cursor, count - 1);
+    WriteCharacter(' ');
+    MoveCursorLeft(count - cursor);
+    count - 1
+}
+
+fn ReadLine(buffer: *mut i8, length: usize) -> usize {
+    let mut count: usize = 0;
+    let mut cursor: usize = 0;
+    let mut key = ReadKey();
+
+    while key != '\r' && key != '\n' {
+        if key == KEY_LEFT && cursor > 0 {
+            cursor -= 1;
+            WriteCharacter('\x08');
+        } else if key == KEY_RIGHT && cursor < count {
+            WriteCharacter(buffer[cursor]);
+            cursor += 1;
+        } else if key == KEY_HOME {
+            MoveCursorLeft(cursor);
+            cursor = 0;
+        } else if key == KEY_END {
+            WriteCharacters(buffer, cursor, count);
+            cursor = count;
+        } else if (key == '\x08' || key == '\x7F') && cursor > 0 {
+            cursor -= 1;
+            WriteCharacter('\x08');
+            count = DeleteCharacter(buffer, cursor, count);
+        } else if key == KEY_DELETE && cursor < count {
+            count = DeleteCharacter(buffer, cursor, count);
+        } else if key >= ' ' && key != '\x7F' && count < length - 1 {
+            count = InsertCharacter(buffer, cursor, count, key);
+            cursor += 1;
+        }
+
+        key = ReadKey();
+    }
+
+    WriteCharacter('\n');
+    buffer[count] = '\0';
+    count
+}

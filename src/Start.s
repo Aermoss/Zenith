@@ -9,5 +9,6 @@ _start:
 
 skip:
     li sp, 0x4000
+    la a0, _end
     bl ra, Main
     hlt

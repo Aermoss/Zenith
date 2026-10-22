@@ -1,0 +1,137 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+const BRAM_START: u32 = 0x00000000;
+const BRAM_END: u32 = 0x00004000;
+const SDRAM_START: u32 = 0x40000000;
+const SDRAM_END: u32 = 0x40800000;
+const FLASH_START: u32 = 0x80000000;
+const FLASH_END: u32 = 0x80800000;
+
+const HEAP_ALIGNMENT: u32 = 8;
+const BLOCK_HEADER_SIZE: u32 = 8;
+
+static mut kernel_end: u32 = 0;
+static mut heap_start: u32 = 0;
+static mut heap_end: u32 = 0;
+
+fn AlignUp(value: u32, alignment: u32) -> u32 {
+    (value + alignment - 1) / alignment * alignment
+}
+
+fn BlockSize(block: u32) -> u32 {
+    *(block as *u32)
+}
+
+fn BlockUsed(block: u32) -> bool {
+    *((block + 4) as *u32) != 0
+}
+
+fn SetBlock(block: u32, size: u32, used: bool) {
+    *(block as *mut u32) = size;
+    *((block + 4) as *mut u32) = if used { 1 } else { 0 };
+}
+
+fn NextBlock(block: u32) -> u32 {
+    block + BLOCK_HEADER_SIZE + BlockSize(block)
+}
+
+fn InitializeMemory(image_end: u32) {
+    kernel_end = image_end;
+    heap_start = AlignUp(image_end, HEAP_ALIGNMENT);
+    heap_end = SDRAM_END;
+    SetBlock(heap_start, heap_end - heap_start - BLOCK_HEADER_SIZE, false);
+}
+
+fn Allocate(size: u32) -> *mut u8 {
+    if size == 0 || size > heap_end - heap_start {
+        return null;
+    }
+
+    let needed = AlignUp(size, HEAP_ALIGNMENT);
+    let mut block = heap_start;
+
+    while block < heap_end {
+        let block_size = BlockSize(block);
+
+        if !BlockUsed(block) && block_size >= needed {
+            if block_size >= needed + BLOCK_HEADER_SIZE + HEAP_ALIGNMENT {
+                SetBlock(block + BLOCK_HEADER_SIZE + needed, block_size - needed - BLOCK_HEADER_SIZE, false);
+                SetBlock(block, needed, true);
+            } else {
+                SetBlock(block, block_size, true);
+            }
+
+            return (block + BLOCK_HEADER_SIZE) as *mut u8;
+        }
+
+        block = NextBlock(block);
+    }
+
+    null
+}
+
+fn Free(pointer: *mut u8) -> bool {
+    let address = pointer as u32;
+    let mut block = heap_start;
+    let mut found = false;
+
+    while block < heap_end && !found {
+        if block + BLOCK_HEADER_SIZE == address && BlockUsed(block) {
+            SetBlock(block, BlockSize(block), false);
+            found = true;
+        } else {
+            block = NextBlock(block);
+        }
+    }
+
+    block = heap_start;
+
+    while block < heap_end {
+        let next = NextBlock(block);
+
+        if next < heap_end && !BlockUsed(block) && !BlockUsed(next) {
+            SetBlock(block, BlockSize(block) + BLOCK_HEADER_SIZE + BlockSize(next), false);
+        } else {
+            block = next;
+        }
+    }
+
+    found
+}
+
+fn GetHeapStatistics(used: *mut u32, free: *mut u32, largest_free: *mut u32) {
+    let mut block = heap_start;
+    *used = 0;
+    *free = 0;
+    *largest_free = 0;
+
+    while block < heap_end {
+        let block_size = BlockSize(block);
+
+        if BlockUsed(block) {
+            *used += block_size;
+        } else {
+            *free += block_size;
+
+            if block_size > *largest_free {
+                *largest_free = block_size;
+            }
+        }
+
+        block = NextBlock(block);
+    }
+}

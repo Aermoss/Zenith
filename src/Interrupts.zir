@@ -1,0 +1,49 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "src/Devices.zir", "src/Animation.zir" : *]
+
+extern "C" {
+    fn InitializeTraps();
+    fn EnableInterrupts();
+    fn DisableInterrupts();
+    fn SetInterruptMask(mask: u32);
+}
+
+const INTERRUPT_TIMER: u32 = 1;
+const CAUSE_TIMER: u32 = 0x80000000;
+
+const TICK_RATE: u32 = 100;
+const TICK_CYCLES: u32 = CLK_FREQ / TICK_RATE;
+
+static mut ticks: u32 = 0;
+static mut next_tick: u32 = 0;
+
+fn StartTimer() {
+    next_tick = GetCycles() + TICK_CYCLES;
+    SetTimer(next_tick);
+    SetInterruptMask(INTERRUPT_TIMER);
+}
+
+@nomangle
+fn HandleTrap(cause: u32) {
+    if cause == CAUSE_TIMER {
+        next_tick += TICK_CYCLES;
+        SetTimer(next_tick);
+        ticks += 1;
+        StepAnimation();
+    }
+}

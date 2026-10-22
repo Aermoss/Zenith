@@ -1,0 +1,110 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "src/Devices.zir" : *]
+
+const ANIMATION_MODES: u32 = 5;
+
+static mut animation_mode: u32 = 0;
+static mut animation_brightness: u8 = 64;
+static mut button_was_pressed: bool = false;
+
+static mut fade_state: u32 = 0;
+static mut fade_red: u8 = 255;
+static mut fade_green: u8 = 0;
+static mut fade_blue: u8 = 0;
+
+fn StepFade() {
+    match fade_state {
+        0 => {
+            fade_green += 5;
+
+            if fade_green >= 255 {
+                fade_state = 1;
+                fade_green = 255;
+            }
+        },
+        1 => {
+            if fade_red <= 5 {
+                fade_state = 2;
+                fade_red = 0;
+            } else {
+                fade_red -= 5;
+            }
+        },
+        2 => {
+            fade_blue += 5;
+
+            if fade_blue >= 255 {
+                fade_state = 3;
+                fade_blue = 255;
+            }
+        },
+        3 => {
+            if fade_green <= 5 {
+                fade_state = 4;
+                fade_green = 0;
+            } else {
+                fade_green -= 5;
+            }
+        },
+        4 => {
+            fade_red += 5;
+
+            if fade_red >= 255 {
+                fade_state = 5;
+                fade_red = 255;
+            }
+        },
+        _ => {
+            if fade_blue <= 5 {
+                fade_state = 0;
+                fade_blue = 0;
+            } else {
+                fade_blue -= 5;
+            }
+        }
+    }
+}
+
+fn StepAnimation() {
+    let pressed = ButtonPressed();
+
+    if pressed && !button_was_pressed {
+        animation_mode = (animation_mode + 1) % ANIMATION_MODES;
+    }
+
+    button_was_pressed = pressed;
+
+    match animation_mode {
+        0 => {
+            StepFade();
+            SetWS2812(fade_red, fade_green, fade_blue, animation_brightness);
+        },
+        1 => {
+            SetWS2812(255, 0, 0, animation_brightness);
+        },
+        2 => {
+            SetWS2812(0, 255, 0, animation_brightness);
+        },
+        3 => {
+            SetWS2812(0, 0, 255, animation_brightness);
+        },
+        _ => {
+            SetWS2812(0, 0, 0, animation_brightness);
+        }
+    }
+}

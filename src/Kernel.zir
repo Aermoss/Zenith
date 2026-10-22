@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Console.zir", "src/Memory.zir", "src/Shell.zir" : *]
+#[include "src/Devices.zir", "src/Console.zir", "src/Memory.zir", "src/Interrupts.zir", "src/Shell.zir" : *]
 
 @track_caller
 fn Panic(message: *i8) {
@@ -35,6 +35,9 @@ fn Main(image_end: u32) {
     SetBaudRate(BAUD_RATE);
     SetLEDs(0x3F);
     InitializeMemory(image_end);
+    InitializeTraps();
+    StartTimer();
+    EnableInterrupts();
     WriteLine("Zenith kernel started.");
     WriteLine("Type help to see the commands.");
     RunShell();

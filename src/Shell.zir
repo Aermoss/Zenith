@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Console.zir", "src/Strings.zir", "src/Memory.zir" : *]
+#[include "src/Devices.zir", "src/Console.zir", "src/Strings.zir", "src/Memory.zir", "src/Interrupts.zir", "src/Animation.zir" : *]
 
 const LINE_LENGTH: usize = 128;
 const DUMP_LENGTH: u32 = 64;
@@ -31,6 +31,7 @@ fn CommandHelp() {
     WriteLine("heap                     show how much of the heap is used");
     WriteLine("alloc <size>             allocate memory from the heap");
     WriteLine("free <address>           free memory allocated with alloc");
+    WriteLine("anim <mode> [brightness] set the RGB LED animation, 0 to 4");
 }
 
 fn WriteRange(name: *i8, start: u32, end: u32) {
@@ -207,6 +208,24 @@ fn CommandFree(arguments: *i8) {
     }
 }
 
+fn CommandAnimation(arguments: *i8) {
+    let mut mode: u32 = 0;
+    let mut brightness = animation_brightness as u32;
+    let mut rest = ParseNumber(arguments, &mut mode);
+
+    if rest != null && !AtEnd(rest) {
+        rest = ParseNumber(rest, &mut brightness);
+    }
+
+    if rest == null || !AtEnd(rest) || mode >= ANIMATION_MODES || brightness > 255 {
+        WriteLine("Usage: anim <mode> [brightness] [speed]");
+        return;
+    }
+
+    animation_mode = mode;
+    animation_brightness = brightness as u8;
+}
+
 fn RunCommand(line: *i8) {
     let mut arguments = line;
 
@@ -217,7 +236,9 @@ fn RunCommand(line: *i8) {
         WriteLine(arguments);
     } else if ParseCommand(line, "uptime", &mut arguments) {
         WriteInteger(GetTime());
-        WriteLine(" ms");
+        Write(" ms, ");
+        WriteInteger(ticks);
+        WriteLine(" timer ticks");
     } else if ParseCommand(line, "clear", &mut arguments) {
         Write("\x1B[2J\x1B[H");
     } else if ParseCommand(line, "info", &mut arguments) {
@@ -234,6 +255,8 @@ fn RunCommand(line: *i8) {
         CommandAlloc(arguments);
     } else if ParseCommand(line, "free", &mut arguments) {
         CommandFree(arguments);
+    } else if ParseCommand(line, "anim", &mut arguments) {
+        CommandAnimation(arguments);
     } else {
         Write("Unknown command: ");
         WriteLine(line);

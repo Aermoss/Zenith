@@ -27,6 +27,7 @@ const LEDS: u32 = 0xFFF0;
 const MS_COUNTER: u32 = 0xFFEC;
 const CYCLE_COUNTER: u32 = 0xFFE8;
 const INSTRUCTION_COUNTER: u32 = 0xFFE4;
+const TIMER_COMPARE: u32 = 0xFFDC;
 
 fn SetBaudRate(baud: u32) {
     *(UART_DIVISOR as *mut u32) = CLK_FREQ / baud;
@@ -62,4 +63,8 @@ fn GetCycles() -> u32 {
 
 fn GetInstructions() -> u32 {
     *(INSTRUCTION_COUNTER as *u32)
+}
+
+fn SetTimer(cycles: u32) {
+    *(TIMER_COMPARE as *mut u32) = cycles;
 }

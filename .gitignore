@@ -1,2 +1,4 @@
-.vscode
-bin
+*.o
+*.bin
+
+src/Kernel.s

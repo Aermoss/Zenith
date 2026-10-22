@@ -1,19 +1,26 @@
-default: prepare run
+ZIRCON_PATH := $(abspath ../Zircon)
+ZODIAC_PATH := $(abspath ../Zodiac)
 
-bin/Boot.o: src/Boot.s
-	zirconc -target aarch64-none-elf -c $< -o $@
+COMPILER := $(ZIRCON_PATH)/bin/zirconc.exe
+ASSEMBLER := $(ZODIAC_PATH)/bin/zas.exe
+LINKER := $(ZODIAC_PATH)/bin/zld.exe
+EMULATOR := $(ZODIAC_PATH)/bin/zemu.exe
 
-bin/Kernel.o: src/Kernel.zir
-	zirconc -target aarch64-none-elf -ffreestanding -c $< -o $@ -O0
+default: build
 
-bin/Kernel.elf: bin/Boot.o bin/Kernel.o
-	ld.lld -T Linker.ld $^ -o $@
+src/Kernel.s: src/Kernel.zir
+	$(COMPILER) $< -o $@ -S -target zodiac
 
-	qemu-system-aarch64 -machine virt -cpu cortex-a57 -kernel $< -nographic
-run: bin/Kernel.elf
+bin/%.o: src/%.s
+	$(ASSEMBLER) $< -o $@
 
-prepare:
-	if not exist bin mkdir bin
+bin/Zenith.bin: bin/Start.o bin/Kernel.o bin/End.o
+	$(LINKER) $^ -o $@ --format=bin --origin=0x40000000
+
+build: bin/Zenith.bin
+
+emulate: bin/Zenith.bin
+	$(EMULATOR) $(ZODIAC_PATH)/boot.hex --flash=$<
 
 clean:
-	if exist bin rmdir /s /q bin
+	del /Q src\Kernel.s bin\*.o bin\*.bin

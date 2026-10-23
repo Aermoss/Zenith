@@ -14,14 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Console.zir", "src/Animation.zir" : *]
-
-extern "C" {
-    fn InitializeTraps();
-    fn EnableInterrupts();
-    fn DisableInterrupts();
-    fn SetInterruptMask(mask: u32);
-}
+#[include "src/Devices.zir", "src/Trap.zir", "src/Console.zir", "src/Process.zir" : *]
 
 const INTERRUPT_TIMER: u32 = 1;
 const INTERRUPT_UART: u32 = 2;
@@ -29,10 +22,8 @@ const INTERRUPT_UART: u32 = 2;
 const CAUSE_TIMER: u32 = 0x80000000;
 const CAUSE_UART: u32 = 0x80000001;
 
-const TICK_RATE: u32 = 100;
 const TICK_CYCLES: u32 = CLK_FREQ / TICK_RATE;
 
-static mut ticks: u32 = 0;
 static mut next_tick: u32 = 0;
 
 fn InitializeInterrupts() {
@@ -44,13 +35,22 @@ fn InitializeInterrupts() {
 }
 
 @nomangle
-fn HandleTrap(cause: u32) {
+fn HandleTrap(cause: u32, frame: u32) -> u32 {
     if cause == CAUSE_TIMER {
         next_tick += TICK_CYCLES;
         SetTimer(next_tick);
         ticks += 1;
-        StepAnimation();
+        processes[current_process as usize].ticks += 1;
+        WakeSleepingProcesses();
+        return Schedule(frame);
     } else if cause == CAUSE_UART {
         ReceiveCharacter();
+        let woken = WakeWaitingProcesses();
+
+        if woken != NO_PROCESS {
+            return SwitchTo(frame, woken);
+        }
     }
+
+    frame
 }

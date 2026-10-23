@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Console.zir", "src/Strings.zir", "src/Memory.zir", "src/Interrupts.zir", "src/Animation.zir" : *]
+#[include "src/Devices.zir", "src/Console.zir", "src/Strings.zir", "src/Memory.zir", "src/Interrupts.zir", "src/Process.zir", "src/Animation.zir", "src/Programs.zir" : *]
 
 const LINE_LENGTH: usize = 128;
 const DUMP_LENGTH: u32 = 64;
@@ -32,6 +32,9 @@ fn CommandHelp() {
     WriteLine("alloc <size>             allocate memory from the heap");
     WriteLine("free <address>           free memory allocated with alloc");
     WriteLine("anim <mode> [brightness] set the RGB LED animation, 0 to 4");
+    WriteLine("ps                       show the processes");
+    WriteLine("run <program>            start anim, counter, spin or hello as a process");
+    WriteLine("kill <pid>               stop a process");
 }
 
 fn WriteRange(name: *i8, start: u32, end: u32) {
@@ -46,7 +49,7 @@ fn CommandInfo() {
     Write("Clock:   ");
     WriteInteger(CLK_FREQ / 1000000);
     WriteLine(" MHz");
-    WriteRange("Stack:   ", BRAM_START, BRAM_END);
+    WriteRange("Stacks:  ", STACKS_START, STACKS_END);
     WriteRange("Kernel:  ", SDRAM_START, kernel_end);
     WriteRange("Heap:    ", heap_start, heap_end);
     WriteRange("Flash:   ", FLASH_START, FLASH_END);
@@ -226,6 +229,122 @@ fn CommandAnimation(arguments: *i8) {
     animation_brightness = brightness as u8;
 }
 
+fn DigitCount(mut value: u32) -> u32 {
+    let mut digits: u32 = 1;
+
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+
+    digits
+}
+
+fn WriteSpaces(count: u32) {
+    let mut i: u32 = 0;
+
+    while i < count {
+        WriteCharacter(' ');
+        i += 1;
+    }
+}
+
+fn WriteColumn(mut text: *i8, width: u32) {
+    let mut length: u32 = 0;
+
+    while *text != '\0' {
+        WriteCharacter(*text);
+        text += 1;
+        length += 1;
+    }
+
+    WriteSpaces(width - length);
+}
+
+fn WriteIntegerColumn(value: u32, width: u32) {
+    WriteInteger(value);
+    WriteSpaces(width - DigitCount(value));
+}
+
+fn StateName(id: u32) -> *i8 {
+    let state = processes[id as usize].state;
+
+    if id == current_process {
+        "running"
+    } else if state == PROCESS_READY {
+        "ready"
+    } else if state == PROCESS_SLEEPING {
+        "sleeping"
+    } else if state == PROCESS_WAITING {
+        "waiting"
+    } else {
+        "crashed"
+    }
+}
+
+fn CommandProcesses() {
+    WriteLine("PID  STATE     TICKS     STACK             NAME");
+    let mut id: u32 = 0;
+
+    while id < MAX_PROCESSES {
+        let process = &processes[id as usize];
+
+        if process.state != PROCESS_FREE {
+            WriteIntegerColumn(id, 5);
+            WriteColumn(StateName(id), 10);
+            WriteIntegerColumn(process.ticks, 10);
+            WriteColumn(if IsStackInBRAM(id) { "bram" } else { "sdram" }, 6);
+            WriteHexadecimal(process.stack_bottom);
+            WriteSpaces(2);
+            WriteLine(process.name);
+        }
+
+        id += 1;
+    }
+}
+
+fn CommandRun(arguments: *i8) {
+    let mut process = NO_PROCESS;
+
+    if Equals(arguments, "anim") {
+        process = Spawn("anim", RunAnimation, 0);
+    } else if Equals(arguments, "counter") {
+        process = Spawn("counter", RunCounter, 0);
+    } else if Equals(arguments, "spin") {
+        process = Spawn("spin", RunSpin, 0);
+    } else if Equals(arguments, "hello") {
+        process = Spawn("hello", RunHello, 0);
+    } else {
+        WriteLine("Usage: run <anim|counter|spin|hello>");
+        return;
+    }
+
+    if process == NO_PROCESS {
+        WriteLine("There is no room for another process.");
+        return;
+    }
+
+    Write("Started process ");
+    WriteInteger(process);
+    WriteCharacter('\n');
+}
+
+fn CommandKill(arguments: *i8) {
+    let mut process: u32 = 0;
+    let rest = ParseNumber(arguments, &mut process);
+
+    if rest == null || !AtEnd(rest) {
+        WriteLine("Usage: kill <pid>");
+        return;
+    }
+
+    if process == 0 || process == current_process {
+        WriteLine("The idle process and the shell cannot be stopped.");
+    } else if !Kill(process) {
+        WriteLine("There is no such process.");
+    }
+}
+
 fn RunCommand(line: *i8) {
     let mut arguments = line;
 
@@ -257,13 +376,19 @@ fn RunCommand(line: *i8) {
         CommandFree(arguments);
     } else if ParseCommand(line, "anim", &mut arguments) {
         CommandAnimation(arguments);
+    } else if ParseCommand(line, "ps", &mut arguments) {
+        CommandProcesses();
+    } else if ParseCommand(line, "run", &mut arguments) {
+        CommandRun(arguments);
+    } else if ParseCommand(line, "kill", &mut arguments) {
+        CommandKill(arguments);
     } else {
         Write("Unknown command: ");
         WriteLine(line);
     }
 }
 
-fn RunShell() {
+fn RunShell(argument: u32) {
     let mut line: [i8; LINE_LENGTH];
 
     loop {

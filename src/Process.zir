@@ -1,0 +1,249 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir" : *]
+
+type ProcessEntry = fn(u32);
+
+const TICK_RATE: u32 = 100;
+const MILLISECONDS_PER_TICK: u32 = 1000 / TICK_RATE;
+
+const MAX_PROCESSES: u32 = 16;
+const NO_PROCESS: u32 = 0xFFFFFFFF;
+
+const STACK_SIZE: u32 = 1024;
+const BRAM_STACKS: u32 = 12;
+const STACKS_END: u32 = 0x00004000;
+const STACKS_START: u32 = STACKS_END - BRAM_STACKS * STACK_SIZE;
+const STACK_CANARY: u32 = 0x5AFE57AC;
+
+const FRAME_SIZE: u32 = 152;
+const FRAME_WORDS: u32 = 34;
+const FRAME_EPC: u32 = 0;
+const FRAME_RA: u32 = 1;
+const FRAME_A0: u32 = 24;
+const FRAME_STATUS: u32 = 32;
+
+const STATUS_PREVIOUS_ENABLE: u32 = 2;
+
+const PROCESS_FREE: u32 = 0;
+const PROCESS_READY: u32 = 1;
+const PROCESS_SLEEPING: u32 = 2;
+const PROCESS_WAITING: u32 = 3;
+const PROCESS_CRASHED: u32 = 4;
+
+class Process {
+    pub state: u32,
+    pub frame: u32,
+    pub wake_tick: u32,
+    pub ticks: u32,
+    pub name: *i8,
+    pub stack_bottom: u32,
+    pub stack_top: u32
+}
+
+static mut processes: [Process; 16];
+static mut current_process: u32 = 0;
+static mut ticks: u32 = 0;
+
+fn IsStackInBRAM(id: u32) -> bool {
+    processes[id as usize].stack_bottom < STACKS_END
+}
+
+fn AllocateStack(id: u32) -> u32 {
+    if id < BRAM_STACKS {
+        STACKS_END - (id + 1) * STACK_SIZE
+    } else {
+        Allocate(STACK_SIZE) as u32
+    }
+}
+
+fn ReleaseStack(id: u32) {
+    if !IsStackInBRAM(id) {
+        Free(processes[id as usize].stack_bottom as *mut u8);
+    }
+}
+
+fn SetStack(id: u32, bottom: u32) {
+    let process = &mut processes[id as usize];
+    process.stack_bottom = bottom;
+    process.stack_top = bottom + STACK_SIZE;
+    *(bottom as *mut u32) = STACK_CANARY;
+}
+
+fn InitializeProcesses() {
+    current_process = 0;
+    processes[0].state = PROCESS_READY;
+    processes[0].name = "idle";
+    SetStack(0, AllocateStack(0));
+}
+
+fn Spawn(name: *i8, entry: ProcessEntry, argument: u32) -> u32 {
+    let interrupts = DisableInterrupts();
+    let mut id: u32 = 1;
+
+    while id < MAX_PROCESSES && processes[id as usize].state != PROCESS_FREE && processes[id as usize].state != PROCESS_CRASHED {
+        id += 1;
+    }
+
+    if id == MAX_PROCESSES {
+        RestoreInterrupts(interrupts);
+        return NO_PROCESS;
+    }
+
+    if processes[id as usize].state == PROCESS_CRASHED {
+        ReleaseStack(id);
+        processes[id as usize].state = PROCESS_FREE;
+    }
+
+    let stack = AllocateStack(id);
+
+    if stack == 0 {
+        RestoreInterrupts(interrupts);
+        return NO_PROCESS;
+    }
+
+    SetStack(id, stack);
+    let frame = (stack + STACK_SIZE - FRAME_SIZE) as *mut u32;
+    let mut i: u32 = 0;
+
+    while i < FRAME_WORDS {
+        frame[i as usize] = 0;
+        i += 1;
+    }
+
+    frame[FRAME_EPC as usize] = entry as *void as u32;
+    frame[FRAME_RA as usize] = ExitProcess as *void as u32;
+    frame[FRAME_A0 as usize] = argument;
+    frame[FRAME_STATUS as usize] = STATUS_PREVIOUS_ENABLE;
+
+    let process = &mut processes[id as usize];
+    process.frame = frame as u32;
+    process.ticks = 0;
+    process.name = name;
+    process.state = PROCESS_READY;
+    RestoreInterrupts(interrupts);
+    id
+}
+
+fn ExitProcess() {
+    DisableInterrupts();
+    ReleaseStack(current_process);
+    processes[current_process as usize].state = PROCESS_FREE;
+    Yield();
+}
+
+fn Kill(id: u32) -> bool {
+    if id == 0 || id == current_process || id >= MAX_PROCESSES {
+        return false;
+    }
+
+    let interrupts = DisableInterrupts();
+    let killed = processes[id as usize].state != PROCESS_FREE;
+
+    if killed {
+        ReleaseStack(id);
+    }
+
+    processes[id as usize].state = PROCESS_FREE;
+    RestoreInterrupts(interrupts);
+    killed
+}
+
+fn Sleep(milliseconds: u32) {
+    let interrupts = DisableInterrupts();
+    let process = &mut processes[current_process as usize];
+    process.wake_tick = ticks + (milliseconds + MILLISECONDS_PER_TICK - 1) / MILLISECONDS_PER_TICK;
+    process.state = PROCESS_SLEEPING;
+    Yield();
+    RestoreInterrupts(interrupts);
+}
+
+fn WaitForInput() {
+    processes[current_process as usize].state = PROCESS_WAITING;
+    Yield();
+}
+
+fn WakeSleepingProcesses() {
+    let mut id: u32 = 1;
+
+    while id < MAX_PROCESSES {
+        let process = &mut processes[id as usize];
+
+        if process.state == PROCESS_SLEEPING && ((ticks - process.wake_tick) as i32) >= 0 {
+            process.state = PROCESS_READY;
+        }
+
+        id += 1;
+    }
+}
+
+fn WakeWaitingProcesses() -> u32 {
+    let mut woken = NO_PROCESS;
+    let mut id: u32 = 1;
+
+    while id < MAX_PROCESSES {
+        let process = &mut processes[id as usize];
+
+        if process.state == PROCESS_WAITING {
+            process.state = PROCESS_READY;
+
+            if woken == NO_PROCESS {
+                woken = id;
+            }
+        }
+
+        id += 1;
+    }
+
+    woken
+}
+
+fn SaveContext(frame: u32) {
+    let process = &mut processes[current_process as usize];
+    process.frame = frame;
+
+    if process.state != PROCESS_FREE && *(process.stack_bottom as *u32) != STACK_CANARY {
+        process.state = PROCESS_CRASHED;
+    }
+}
+
+fn SwitchTo(frame: u32, id: u32) -> u32 {
+    SaveContext(frame);
+    current_process = id;
+    processes[id as usize].frame
+}
+
+@nomangle
+fn Schedule(frame: u32) -> u32 {
+    SaveContext(frame);
+    let mut id = current_process;
+    let mut i: u32 = 0;
+
+    while i < MAX_PROCESSES {
+        id = (id + 1) % MAX_PROCESSES;
+
+        if id != 0 && processes[id as usize].state == PROCESS_READY {
+            current_process = id;
+            return processes[id as usize].frame;
+        }
+
+        i += 1;
+    }
+
+    current_process = 0;
+    processes[0].frame
+}

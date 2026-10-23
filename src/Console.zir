@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir" : *]
+#[include "src/Devices.zir", "src/Process.zir" : *]
 
 const BAUD_RATE: u32 = 115200;
 
@@ -84,7 +84,13 @@ fn HasCharacter() -> bool {
 }
 
 fn ReadCharacter() -> i8 {
-    while !HasCharacter() {}
+    let state = DisableInterrupts();
+
+    while !HasCharacter() {
+        WaitForInput();
+    }
+
+    RestoreInterrupts(state);
     let character = receive_buffer[receive_tail as usize];
     receive_tail = (receive_tail + 1) & (RECEIVE_BUFFER_SIZE - 1);
     character

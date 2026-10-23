@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#[include "src/Trap.zir" : *]
+
 const BRAM_START: u32 = 0x00000000;
 const BRAM_END: u32 = 0x00004000;
 const SDRAM_START: u32 = 0x40000000;
@@ -57,7 +59,10 @@ fn InitializeMemory(image_end: u32) {
 }
 
 fn Allocate(size: u32) -> *mut u8 {
+    let interrupts = DisableInterrupts();
+
     if size == 0 || size > heap_end - heap_start {
+        RestoreInterrupts(interrupts);
         return null;
     }
 
@@ -75,16 +80,19 @@ fn Allocate(size: u32) -> *mut u8 {
                 SetBlock(block, block_size, true);
             }
 
+            RestoreInterrupts(interrupts);
             return (block + BLOCK_HEADER_SIZE) as *mut u8;
         }
 
         block = NextBlock(block);
     }
 
+    RestoreInterrupts(interrupts);
     null
 }
 
 fn Free(pointer: *mut u8) -> bool {
+    let interrupts = DisableInterrupts();
     let address = pointer as u32;
     let mut block = heap_start;
     let mut found = false;
@@ -110,10 +118,12 @@ fn Free(pointer: *mut u8) -> bool {
         }
     }
 
+    RestoreInterrupts(interrupts);
     found
 }
 
 fn GetHeapStatistics(used: *mut u32, free: *mut u32, largest_free: *mut u32) {
+    let interrupts = DisableInterrupts();
     let mut block = heap_start;
     *used = 0;
     *free = 0;
@@ -134,4 +144,6 @@ fn GetHeapStatistics(used: *mut u32, free: *mut u32, largest_free: *mut u32) {
 
         block = NextBlock(block);
     }
+
+    RestoreInterrupts(interrupts);
 }

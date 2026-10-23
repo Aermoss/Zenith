@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir" : *]
+#[include "src/Devices.zir", "src/Process.zir" : *]
 
 const ANIMATION_MODES: u32 = 5;
+const ANIMATION_INTERVAL: u32 = 10;
 
 static mut animation_mode: u32 = 0;
 static mut animation_brightness: u8 = 64;
@@ -106,5 +107,12 @@ fn StepAnimation() {
         _ => {
             SetWS2812(0, 0, 0, animation_brightness);
         }
+    }
+}
+
+fn RunAnimation(argument: u32) {
+    loop {
+        StepAnimation();
+        Sleep(ANIMATION_INTERVAL);
     }
 }

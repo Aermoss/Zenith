@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Animation.zir" : *]
+#[include "src/Devices.zir", "src/Console.zir", "src/Animation.zir" : *]
 
 extern "C" {
     fn InitializeTraps();
@@ -24,7 +24,10 @@ extern "C" {
 }
 
 const INTERRUPT_TIMER: u32 = 1;
+const INTERRUPT_UART: u32 = 2;
+
 const CAUSE_TIMER: u32 = 0x80000000;
+const CAUSE_UART: u32 = 0x80000001;
 
 const TICK_RATE: u32 = 100;
 const TICK_CYCLES: u32 = CLK_FREQ / TICK_RATE;
@@ -32,10 +35,12 @@ const TICK_CYCLES: u32 = CLK_FREQ / TICK_RATE;
 static mut ticks: u32 = 0;
 static mut next_tick: u32 = 0;
 
-fn StartTimer() {
+fn InitializeInterrupts() {
+    InitializeTraps();
     next_tick = GetCycles() + TICK_CYCLES;
     SetTimer(next_tick);
-    SetInterruptMask(INTERRUPT_TIMER);
+    SetInterruptMask(INTERRUPT_TIMER | INTERRUPT_UART);
+    EnableInterrupts();
 }
 
 @nomangle
@@ -45,5 +50,7 @@ fn HandleTrap(cause: u32) {
         SetTimer(next_tick);
         ticks += 1;
         StepAnimation();
+    } else if cause == CAUSE_UART {
+        ReceiveCharacter();
     }
 }

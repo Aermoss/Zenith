@@ -35,9 +35,7 @@ fn Main(image_end: u32) {
     SetBaudRate(BAUD_RATE);
     SetLEDs(0x3F);
     InitializeMemory(image_end);
-    InitializeTraps();
-    StartTimer();
-    EnableInterrupts();
+    InitializeInterrupts();
     WriteLine("Zenith kernel started.");
     WriteLine("Type help to see the commands.");
     RunShell();

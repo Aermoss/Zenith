@@ -63,13 +63,31 @@ fn WriteHexadecimal(value: u32) {
     WriteHexadecimalDigits(value, 8);
 }
 
+const RECEIVE_BUFFER_SIZE: u32 = 256;
+
+static mut receive_buffer: [i8; 256];
+static mut receive_head: u32 = 0;
+static mut receive_tail: u32 = 0;
+
+fn ReceiveCharacter() {
+    let character = *(UART_DATA as *u32) as i8;
+    let next = (receive_head + 1) & (RECEIVE_BUFFER_SIZE - 1);
+
+    if next != receive_tail {
+        receive_buffer[receive_head as usize] = character;
+        receive_head = next;
+    }
+}
+
 fn HasCharacter() -> bool {
-    (*(UART_STATUS as *u32) & 1) != 0
+    receive_head != receive_tail
 }
 
 fn ReadCharacter() -> i8 {
     while !HasCharacter() {}
-    *(UART_DATA as *u32) as i8
+    let character = receive_buffer[receive_tail as usize];
+    receive_tail = (receive_tail + 1) & (RECEIVE_BUFFER_SIZE - 1);
+    character
 }
 
 const KEY_HOME: i8 = '\x01';

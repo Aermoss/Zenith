@@ -50,7 +50,7 @@ fn SetWS2812(_r: u8, _g: u8, _b: u8, brightness: u8) {
 }
 
 fn ButtonPressed() -> bool {
-    (*(BUTTON as *u32) & 1) == 0
+    (*(BUTTON as *u32) & 1) != 0
 }
 
 fn GetTime() -> u32 {

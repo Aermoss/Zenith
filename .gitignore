@@ -1,4 +1,6 @@
 *.o
 *.bin
+*.exe
 
 src/Kernel.s
+files/**

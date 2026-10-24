@@ -5,6 +5,7 @@ COMPILER := $(ZIRCON_PATH)/bin/zirconc.exe
 ASSEMBLER := $(ZODIAC_PATH)/bin/zas.exe
 LINKER := $(ZODIAC_PATH)/bin/zld.exe
 EMULATOR := $(ZODIAC_PATH)/bin/zemu.exe
+IMAGER := bin/Imager.exe
 
 default: build
 
@@ -17,10 +18,16 @@ bin/%.o: src/%.s
 bin/Zenith.bin: bin/Start.o bin/Trap.o bin/Kernel.o bin/End.o
 	$(LINKER) $^ -o $@ --format=bin --origin=0x40000000
 
-build: bin/Zenith.bin
+$(IMAGER): tools/Imager.zir
+	$(COMPILER) $< -o $@ -I$(ZIRCON_PATH)/include -lucrt
 
-emulate: bin/Zenith.bin
-	$(EMULATOR) $(ZODIAC_PATH)/boot.hex --flash=$< --quiet
+bin/Files.bin: $(IMAGER) $(wildcard files/* files/*/* files/*/*/*)
+	$(IMAGER) files -o $@
+
+build: bin/Zenith.bin bin/Files.bin
+
+emulate: bin/Zenith.bin bin/Files.bin
+	$(EMULATOR) $(ZODIAC_PATH)/boot.hex --flash=bin/Zenith.bin --flash=bin/Files.bin@0x200000 --quiet
 
 clean:
-	del /Q src\Kernel.s bin\*.o bin\*.bin
+	del /Q src\Kernel.s bin\*.o bin\*.bin bin\*.exe

@@ -1,0 +1,310 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "std/io", "std/str", "std/vec", "std/file" : *]
+
+extern "C" {
+    fn fopen(pathname: *i8, mode: *i8) -> *mut void;
+    fn fread(ptr: *mut void, size: usize, nmemb: usize, stream: *mut void) -> usize;
+    fn fwrite(ptr: *void, size: usize, nmemb: usize, stream: *mut void) -> usize;
+    fn fseek(stream: *mut void, offset: i32, whence: i32) -> i32;
+    fn ftell(stream: *mut void) -> i32;
+    fn fclose(stream: *mut void) -> i32;
+}
+
+const SEEK_END: i32 = 2;
+
+const IMAGE_MAGIC: u32 = 0x53464E5A;
+const IMAGE_VERSION: u32 = 4;
+const BLOCK_SIZE: u32 = 4096;
+const TABLE_BLOCKS: u32 = 8;
+const MAX_BLOCKS: u32 = 1536;
+const DEFAULT_BLOCKS: u32 = 256;
+const HEADER_SIZE: u32 = 32;
+const ENTRY_SIZE: u32 = 64;
+const NAME_LENGTH: u32 = 32;
+const MAX_ENTRIES: u32 = 63;
+const CHECKSUM_SEED: u32 = 0x5A5A5A5A;
+const DIRECTORY: u32 = 1;
+
+fn PutWord(image: *mut u8, offset: u32, value: u32) {
+    image[offset as usize] = (value & 0xFF) as u8;
+    image[(offset + 1) as usize] = ((value >> 8) & 0xFF) as u8;
+    image[(offset + 2) as usize] = ((value >> 16) & 0xFF) as u8;
+    image[(offset + 3) as usize] = (value >> 24) as u8;
+}
+
+fn GetWord(image: *u8, offset: u32) -> u32 {
+    image[offset as usize] as u32 | (image[(offset + 1) as usize] as u32 << 8) |
+        (image[(offset + 2) as usize] as u32 << 16) | (image[(offset + 3) as usize] as u32 << 24)
+}
+
+fn TableChecksum(image: *u8, count: u32) -> u32 {
+    let length = (HEADER_SIZE + count * ENTRY_SIZE) / 4;
+    let mut sum = CHECKSUM_SEED;
+    let mut i: u32 = 0;
+
+    while i < length {
+        let word = if i == 5 { 0 } else { GetWord(image, i * 4) };
+        sum = ((sum << 5) | (sum >> 27)) ^ word;
+        i += 1;
+    }
+
+    sum
+}
+
+fn FileSize(path: &String) -> i32 {
+    let file = fopen(path.Data(), "rb");
+    if file == null { return -1; }
+    fseek(file, 0, SEEK_END);
+    let size = ftell(file);
+    fclose(file);
+    size
+}
+
+fn ReadInto(path: &String, destination: *mut u8, size: u32) -> bool {
+    let file = fopen(path.Data(), "rb");
+    if file == null { return false; }
+    let read = fread(destination as *mut void, 1, size as usize, file);
+    fclose(file);
+    read == size as usize
+}
+
+fn IsValidName(name: &String) -> bool {
+    let mut i: usize = 0;
+
+    while i < name.Length() {
+        if name.Data()[i] == ' ' {
+            return false;
+        }
+
+        i += 1;
+    }
+
+    name.Length() > 0 && name.Length() < NAME_LENGTH as usize
+}
+
+class ImageBuilder {
+    pub paths: Vector<String>,
+    pub names: Vector<String>,
+    pub ids: Vector<u32>,
+    pub parents: Vector<u32>,
+    pub flags: Vector<u32>,
+    pub next_id: u32 = 1;
+
+    ImageBuilder(&mut this) {}
+
+    pub fn Add(&mut this, path: &String, name: &String, parent: u32, flags: u32) -> u32 {
+        let id = this.next_id;
+        this.next_id += 1;
+        this.paths.PushBack(path);
+        this.names.PushBack(name);
+        this.ids.PushBack(id);
+        this.parents.PushBack(parent);
+        this.flags.PushBack(flags);
+        id
+    }
+
+    pub fn AddContents(&mut this, directory: &String, parent: u32) {
+        let mut find_data: WIN32_FIND_DATAA;
+        let handle = FindFirstFileA((directory + "\\*").Data(), &mut find_data);
+
+        if handle == INVALID_HANDLE_VALUE {
+            return;
+        }
+
+        loop {
+            let name = String(&find_data.cFileName[0] as *i8);
+
+            if name != "." && name != ".." {
+                let path = directory + "\\" + name;
+
+                if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 {
+                    let id = this.Add(path, name, parent, DIRECTORY);
+                    this.AddContents(path, id);
+                } else {
+                    this.Add(path, name, parent, 0);
+                }
+            }
+
+            if FindNextFileA(handle, &mut find_data) == 0 {
+                break;
+            }
+        }
+
+        FindClose(handle);
+    }
+}
+
+fn PrintUsage(executable: String) {
+    WriteLine("OVERVIEW: Packs files and directories into a Zenith file system image");
+    WriteLine("USAGE: " + executable + " [options] -o <image> <inputs...>");
+    WriteLine("A file goes into the root directory, so does what is inside a directory.");
+    WriteLine("OPTIONS:");
+    WriteLine("  --blocks=<count>         Make a file system of <count> blocks of 4096 bytes, 256 by default");
+}
+
+fn Main(args: &mut Vector<String>) -> i32 {
+    let (_, executable) = SplitPath(args[0]);
+    let mut output = String();
+    let mut builder = ImageBuilder();
+    let mut block_count = DEFAULT_BLOCKS;
+    let mut i: usize = 1;
+
+    while i < args.Length() {
+        let arg = args[i];
+
+        if arg == "--help" || arg == "-h" {
+            PrintUsage(executable);
+            return 0;
+        } else if arg.StartsWith("--blocks=") {
+            block_count = String::ToInteger(arg.SubString(9), 10).Unwrap() as u32;
+        } else if arg == "-o" {
+            i += 1;
+
+            if i < args.Length() {
+                output = args[i];
+            } else {
+                WriteLine("Missing argument to '-o'.");
+                return 1;
+            }
+        } else if FolderExists(arg) {
+            builder.AddContents(arg, 0);
+        } else if FileExists(arg) {
+            let (_, name) = SplitPath(arg);
+            builder.Add(arg, name, 0, 0);
+        } else {
+            WriteLine("Cannot find '" + arg + "'.");
+            return 1;
+        }
+
+        i += 1;
+    }
+
+    if output.Empty() {
+        PrintUsage(executable);
+        return 1;
+    }
+
+    if block_count <= TABLE_BLOCKS || block_count > MAX_BLOCKS {
+        WriteLine("The file system must have 3 to 1536 blocks.");
+        return 1;
+    }
+
+    let count = builder.paths.Length() as u32;
+
+    if count > MAX_ENTRIES {
+        WriteLine("There can be at most 63 files and directories.");
+        return 1;
+    }
+
+    let total = block_count * BLOCK_SIZE;
+    let image = new u8[total as usize];
+    let mut j: u32 = 0;
+
+    while j < total {
+        image[j as usize] = 0xFF;
+        j += 1;
+    }
+
+    j = 0;
+
+    while j < HEADER_SIZE + count * ENTRY_SIZE {
+        image[j as usize] = 0;
+        j += 1;
+    }
+
+    let mut next_block = TABLE_BLOCKS;
+    let mut index: u32 = 0;
+
+    while index < count {
+        let (path, name) = (builder.paths[index as usize], builder.names[index as usize]);
+        let directory = builder.flags[index as usize] == DIRECTORY;
+
+        if !IsValidName(name) {
+            WriteLine("The name '" + name + "' must have 1 to 31 characters without spaces.");
+            return 1;
+        }
+
+        let size = if directory { 0 } else { FileSize(path) };
+
+        if size < 0 {
+            WriteLine("Cannot open '" + path + "'.");
+            return 1;
+        }
+
+        let blocks = (size as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let first = if blocks == 0 { 0 } else { next_block };
+
+        if next_block + blocks > block_count {
+            WriteLine("The files do not fit in " + String::FromInteger(block_count as u64) + " blocks.");
+            return 1;
+        }
+
+        let entry = HEADER_SIZE + index * ENTRY_SIZE;
+        let mut k: usize = 0;
+
+        while k < name.Length() {
+            image[entry as usize + k] = name.Data()[k] as u8;
+            k += 1;
+        }
+
+        PutWord(image, entry + NAME_LENGTH, first);
+        PutWord(image, entry + NAME_LENGTH + 4, size as u32);
+        PutWord(image, entry + NAME_LENGTH + 8, builder.ids[index as usize]);
+        PutWord(image, entry + NAME_LENGTH + 12, builder.parents[index as usize]);
+        PutWord(image, entry + NAME_LENGTH + 16, builder.flags[index as usize]);
+
+        if size > 0 && !ReadInto(path, image + (first * BLOCK_SIZE) as usize, size as u32) {
+            WriteLine("Cannot read '" + path + "'.");
+            return 1;
+        }
+
+        next_block += blocks;
+        index += 1;
+    }
+
+    PutWord(image, 0, IMAGE_MAGIC);
+    PutWord(image, 4, IMAGE_VERSION);
+    PutWord(image, 8, 1);
+    PutWord(image, 12, count);
+    PutWord(image, 16, block_count);
+    PutWord(image, 24, builder.next_id);
+    PutWord(image, 28, next_block);
+    PutWord(image, 20, TableChecksum(image, count));
+    j = 0;
+
+    while j < total {
+        let (b0, b1) = (image[j as usize], image[(j + 1) as usize]);
+        image[j as usize] = image[(j + 3) as usize];
+        image[(j + 1) as usize] = image[(j + 2) as usize];
+        image[(j + 2) as usize] = b1;
+        image[(j + 3) as usize] = b0;
+        j += 4;
+    }
+
+    let file = fopen(output.Data(), "wb");
+
+    if file == null {
+        WriteLine("Cannot create '" + output + "'.");
+        return 1;
+    }
+
+    fwrite(image as *void, 1, total as usize, file);
+    fclose(file);
+    WriteLine("Packed " + String::FromInteger(count as u64) + " entries into " + String::FromInteger(block_count as u64) + " blocks.");
+    0
+}

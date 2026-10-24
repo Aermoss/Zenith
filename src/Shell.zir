@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Console.zir", "src/Strings.zir", "src/Memory.zir", "src/Interrupts.zir", "src/Process.zir", "src/Animation.zir", "src/Programs.zir" : *]
+#[include "src/Devices.zir", "src/Console.zir", "src/Strings.zir", "src/Memory.zir", "src/Interrupts.zir", "src/Process.zir", "src/Animation.zir", "src/Programs.zir", "src/FileSystem.zir" : *]
 
 const LINE_LENGTH: usize = 128;
 const DUMP_LENGTH: u32 = 64;
+const CAT_BUFFER_SIZE: usize = 64;
 
 fn CommandHelp() {
     WriteLine("help                     show the commands");
@@ -35,6 +36,17 @@ fn CommandHelp() {
     WriteLine("ps                       show the processes");
     WriteLine("run <program>            start anim, counter, spin or hello as a process");
     WriteLine("kill <pid>               stop a process");
+    WriteLine("ls [path]                show a directory");
+    WriteLine("cat <file>               print a file");
+    WriteLine("write <file> <text>      write the text into a file");
+    WriteLine("mkdir <path>             make a directory");
+    WriteLine("cd [path]                go into a directory, or to the root");
+    WriteLine("pwd                      show the current directory");
+    WriteLine("cp <source> <target>     copy a file");
+    WriteLine("mv <source> <target>     move or rename a file or a directory");
+    WriteLine("rm <path>                delete a file or an empty directory");
+    WriteLine("df                       show how much of the file system is used");
+    WriteLine("format                   make an empty file system, the files are lost");
 }
 
 fn WriteRange(name: *i8, start: u32, end: u32) {
@@ -46,13 +58,20 @@ fn WriteRange(name: *i8, start: u32, end: u32) {
 }
 
 fn CommandInfo() {
-    Write("Clock:   ");
+    Write("Clock:    ");
     WriteInteger(CLK_FREQ / 1000000);
     WriteLine(" MHz");
-    WriteRange("Stacks:  ", STACKS_START, STACKS_END);
-    WriteRange("Kernel:  ", SDRAM_START, kernel_end);
-    WriteRange("Heap:    ", heap_start, heap_end);
-    WriteRange("Flash:   ", FLASH_START, FLASH_END);
+    WriteRange("Stacks:   ", STACKS_START, STACKS_END);
+    WriteRange("Kernel:   ", SDRAM_START, kernel_end);
+    WriteRange("Heap:     ", heap_start, heap_end);
+    WriteRange("Flash:    ", FLASH_START, FLASH_END);
+    Write("Flash ID: 0x");
+    WriteHexadecimalDigits(ReadFlashId(), 6);
+    WriteCharacter('\n');
+
+    if HasFileSystem() {
+        WriteRange("Files:    ", FILE_SYSTEM_START, FILE_SYSTEM_START + FileSystemBlocks() * BLOCK_SIZE);
+    }
 }
 
 fn IsWordAddress(address: u32) -> bool {
@@ -339,6 +358,257 @@ fn CommandKill(arguments: *i8) {
     }
 }
 
+static mut first_path: [i8; 128];
+static mut second_path: [i8; 128];
+
+fn ReportFileError(error: u32) {
+    if error != FILE_OK {
+        WriteLine(FileErrorMessage(error));
+    }
+}
+
+fn ParseOnePath(arguments: *i8, usage: *i8) -> bool {
+    let rest = ParseWord(arguments, &mut first_path[0], LINE_LENGTH as u32);
+
+    if rest == null || !AtEnd(rest) {
+        WriteLine(usage);
+        return false;
+    }
+
+    true
+}
+
+fn ParseTwoPaths(arguments: *i8, usage: *i8) -> bool {
+    let mut rest = ParseWord(arguments, &mut first_path[0], LINE_LENGTH as u32);
+
+    if rest != null {
+        rest = ParseWord(rest, &mut second_path[0], LINE_LENGTH as u32);
+    }
+
+    if rest == null || !AtEnd(rest) {
+        WriteLine(usage);
+        return false;
+    }
+
+    true
+}
+
+fn WriteEntry(file: *FileEntry) {
+    if IsDirectory(file) {
+        Write(FileName(file));
+        WriteLine("/");
+    } else {
+        WriteColumn(FileName(file), FILE_NAME_LENGTH);
+        WriteInteger(file->size);
+        WriteLine(" bytes");
+    }
+}
+
+fn CommandList(arguments: *i8) {
+    if !HasFileSystem() {
+        ReportFileError(FILE_NO_FILE_SYSTEM);
+        return;
+    }
+
+    let mut index = IndexOfId(current_directory);
+
+    if !AtEnd(arguments) {
+        if !ParseOnePath(arguments, "Usage: ls [path]") {
+            return;
+        }
+
+        index = FindPath(&first_path[0] as *i8);
+    }
+
+    if index == NO_ENTRY {
+        ReportFileError(FILE_NOT_FOUND);
+        return;
+    }
+
+    if !IsDirectoryIndex(index) {
+        WriteEntry(GetFile(index) as *FileEntry);
+        return;
+    }
+
+    let directory = IdOfIndex(index);
+    let count = FileCount();
+    let mut i: u32 = 0;
+
+    while i < count {
+        let file = GetFile(i) as *FileEntry;
+
+        if file->parent == directory {
+            WriteEntry(file);
+        }
+
+        i += 1;
+    }
+}
+
+fn CommandCat(arguments: *i8) {
+    if !ParseOnePath(arguments, "Usage: cat <file>") {
+        return;
+    }
+
+    if !HasFileSystem() {
+        ReportFileError(FILE_NO_FILE_SYSTEM);
+        return;
+    }
+
+    let file = FindFile(&first_path[0] as *i8);
+
+    if file == null {
+        ReportFileError(FILE_NOT_FOUND);
+        return;
+    }
+
+    if IsDirectory(file) {
+        ReportFileError(FILE_IS_DIRECTORY);
+        return;
+    }
+
+    let mut buffer: [u8; CAT_BUFFER_SIZE];
+    let mut offset: u32 = 0;
+
+    loop {
+        let count = ReadFile(file, offset, &mut buffer[0], CAT_BUFFER_SIZE as u32);
+
+        if count == 0 {
+            break;
+        }
+
+        let mut i: u32 = 0;
+
+        while i < count {
+            WriteCharacter(buffer[i as usize] as i8);
+            i += 1;
+        }
+
+        offset += count;
+    }
+}
+
+fn CommandWrite(arguments: *i8) {
+    let rest = ParseWord(arguments, &mut first_path[0], LINE_LENGTH as u32);
+
+    if rest == null {
+        WriteLine("Usage: write <file> <text>");
+        return;
+    }
+
+    let text = SkipSpaces(rest);
+    let length = StringLength(text);
+    let data = Allocate(length + 1);
+
+    if data == null {
+        ReportFileError(FILE_NO_MEMORY);
+        return;
+    }
+
+    let mut i: u32 = 0;
+
+    while i < length {
+        data[i as usize] = *(text + i as usize) as u8;
+        i += 1;
+    }
+
+    data[length as usize] = '\n' as u8;
+    let error = WriteFile(&first_path[0] as *i8, data as *u8, length + 1);
+    Free(data);
+    ReportFileError(error);
+}
+
+fn CommandMakeDirectory(arguments: *i8) {
+    if ParseOnePath(arguments, "Usage: mkdir <path>") {
+        ReportFileError(MakeDirectory(&first_path[0] as *i8));
+    }
+}
+
+fn CommandRemove(arguments: *i8) {
+    if ParseOnePath(arguments, "Usage: rm <path>") {
+        ReportFileError(RemovePath(&first_path[0] as *i8));
+    }
+}
+
+fn CommandChangeDirectory(arguments: *i8) {
+    if AtEnd(arguments) {
+        ReportFileError(ChangeDirectory("/"));
+    } else if ParseOnePath(arguments, "Usage: cd [path]") {
+        ReportFileError(ChangeDirectory(&first_path[0] as *i8));
+    }
+}
+
+fn WriteDirectoryPath(id: u32) {
+    let index = IndexOfId(id);
+
+    if id == ROOT_DIRECTORY || index == NO_ENTRY {
+        return;
+    }
+
+    let file = GetFile(index) as *FileEntry;
+    WriteDirectoryPath(file->parent);
+    WriteCharacter('/');
+    Write(FileName(file));
+}
+
+fn CommandPrintDirectory() {
+    if current_directory == ROOT_DIRECTORY {
+        WriteCharacter('/');
+    } else {
+        WriteDirectoryPath(current_directory);
+    }
+
+    WriteCharacter('\n');
+}
+
+fn CommandCopy(arguments: *i8) {
+    if ParseTwoPaths(arguments, "Usage: cp <source> <target>") {
+        ReportFileError(CopyFile(&first_path[0] as *i8, &second_path[0] as *i8));
+    }
+}
+
+fn CommandMove(arguments: *i8) {
+    if ParseTwoPaths(arguments, "Usage: mv <source> <target>") {
+        ReportFileError(MovePath(&first_path[0] as *i8, &second_path[0] as *i8));
+    }
+}
+
+fn CommandDiskFree() {
+    if !HasFileSystem() {
+        ReportFileError(FILE_NO_FILE_SYSTEM);
+        return;
+    }
+
+    let (total, used) = (FileSystemBlocks(), UsedBlockCount());
+    Write("Blocks:  ");
+    WriteInteger(used);
+    Write(" of ");
+    WriteInteger(total);
+    Write(" used, ");
+    WriteInteger(BLOCK_SIZE);
+    WriteLine(" bytes each");
+    Write("Free:    ");
+    WriteInteger((total - used) * BLOCK_SIZE);
+    WriteLine(" bytes");
+    Write("Entries: ");
+    WriteInteger(FileCount());
+    Write(" of ");
+    WriteInteger(MAX_FILES);
+    Write(", the table is in block ");
+    WriteInteger(current_table);
+    Write(" at ");
+    WriteInteger(current_offset);
+    WriteCharacter('\n');
+}
+
+fn CommandFormat() {
+    let error = FormatFileSystem(DEFAULT_BLOCKS);
+
+    if error != FILE_OK {
+        WriteLine(FileErrorMessage(error));
+    }
+}
+
 fn RunCommand(line: *i8) {
     let mut arguments = line;
 
@@ -376,6 +646,28 @@ fn RunCommand(line: *i8) {
         CommandRun(arguments);
     } else if ParseCommand(line, "kill", &mut arguments) {
         CommandKill(arguments);
+    } else if ParseCommand(line, "ls", &mut arguments) {
+        CommandList(arguments);
+    } else if ParseCommand(line, "cat", &mut arguments) {
+        CommandCat(arguments);
+    } else if ParseCommand(line, "write", &mut arguments) {
+        CommandWrite(arguments);
+    } else if ParseCommand(line, "rm", &mut arguments) {
+        CommandRemove(arguments);
+    } else if ParseCommand(line, "mkdir", &mut arguments) {
+        CommandMakeDirectory(arguments);
+    } else if ParseCommand(line, "cd", &mut arguments) {
+        CommandChangeDirectory(arguments);
+    } else if ParseCommand(line, "pwd", &mut arguments) {
+        CommandPrintDirectory();
+    } else if ParseCommand(line, "cp", &mut arguments) {
+        CommandCopy(arguments);
+    } else if ParseCommand(line, "mv", &mut arguments) {
+        CommandMove(arguments);
+    } else if ParseCommand(line, "df", &mut arguments) {
+        CommandDiskFree();
+    } else if ParseCommand(line, "format", &mut arguments) {
+        CommandFormat();
     } else {
         Write("Unknown command: ");
         WriteLine(line);

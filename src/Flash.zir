@@ -1,0 +1,186 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "src/Devices.zir", "src/Trap.zir", "src/Process.zir" : *]
+
+const FLASH_CONTROL: u32 = 0xFFD4;
+const FLASH_DATA: u32 = 0xFFD8;
+const FLASH_SELECTED: u32 = 1;
+const FLASH_TRANSFERRING: u32 = 2;
+
+const FLASH_PAGE_PROGRAM: u32 = 0x02;
+const FLASH_READ_STATUS: u32 = 0x05;
+const FLASH_WRITE_ENABLE: u32 = 0x06;
+const FLASH_SECTOR_ERASE: u32 = 0x20;
+const FLASH_READ_ID: u32 = 0x9F;
+const FLASH_STATUS_BUSY: u32 = 1;
+
+const FLASH_SECTOR_SIZE: u32 = 4096;
+const FLASH_PAGE_SIZE: u32 = 256;
+
+const FLASH_WRITABLE_START: u32 = 0x200000;
+const FLASH_WRITABLE_END: u32 = 0x800000;
+
+const FLASH_BUSY_POLLS: u32 = 64;
+const FLASH_TIMEOUT_MILLISECONDS: u32 = 2000;
+
+static mut flash_page: [u8; 256];
+
+fn SelectFlash() {
+    *(FLASH_CONTROL as *mut u32) = FLASH_SELECTED;
+}
+
+fn DeselectFlash() {
+    *(FLASH_CONTROL as *mut u32) = 0;
+}
+
+fn TransferFlashByte(value: u32) -> u32 {
+    *(FLASH_DATA as *mut u32) = value;
+    while (*(FLASH_CONTROL as *u32) & FLASH_TRANSFERRING) != 0 {}
+    *(FLASH_DATA as *u32)
+}
+
+fn SendFlashCommand(command: u32, address: u32) {
+    TransferFlashByte(command);
+    TransferFlashByte((address >> 16) & 0xFF);
+    TransferFlashByte((address >> 8) & 0xFF);
+    TransferFlashByte(address & 0xFF);
+}
+
+fn IsWritableFlash(address: u32, count: u32) -> bool {
+    address >= FLASH_WRITABLE_START && address < FLASH_WRITABLE_END && count <= FLASH_WRITABLE_END - address
+}
+
+fn ReadFlashId() -> u32 {
+    let interrupts = DisableInterrupts();
+    SelectFlash();
+    TransferFlashByte(FLASH_READ_ID);
+    let mut id = TransferFlashByte(0) << 16;
+    id |= TransferFlashByte(0) << 8;
+    id |= TransferFlashByte(0);
+    DeselectFlash();
+    RestoreInterrupts(interrupts);
+    id
+}
+
+fn ReadFlashRegister(command: u32) -> u32 {
+    let interrupts = DisableInterrupts();
+    SelectFlash();
+    TransferFlashByte(command);
+    let value = TransferFlashByte(0);
+    DeselectFlash();
+    RestoreInterrupts(interrupts);
+    value
+}
+
+fn ReadFlashStatus() -> u32 {
+    ReadFlashRegister(FLASH_READ_STATUS)
+}
+
+fn WaitForFlash() -> bool {
+    let start = GetTime();
+    let mut polls: u32 = 0;
+
+    while (ReadFlashStatus() & FLASH_STATUS_BUSY) != 0 {
+        if GetTime() - start > FLASH_TIMEOUT_MILLISECONDS {
+            return false;
+        }
+
+        if polls < FLASH_BUSY_POLLS {
+            polls += 1;
+        } else {
+            Sleep(1);
+        }
+    }
+
+    true
+}
+
+fn EnableFlashWrite() {
+    let interrupts = DisableInterrupts();
+    SelectFlash();
+    TransferFlashByte(FLASH_WRITE_ENABLE);
+    DeselectFlash();
+    RestoreInterrupts(interrupts);
+}
+
+fn EraseFlashSector(address: u32) -> bool {
+    if (address & (FLASH_SECTOR_SIZE - 1)) != 0 || !IsWritableFlash(address, FLASH_SECTOR_SIZE) {
+        return false;
+    }
+
+    EnableFlashWrite();
+    let interrupts = DisableInterrupts();
+    SelectFlash();
+    SendFlashCommand(FLASH_SECTOR_ERASE, address);
+    DeselectFlash();
+    RestoreInterrupts(interrupts);
+    WaitForFlash()
+}
+
+fn ProgramFlashPage(address: u32, data: *u8, count: u32) -> bool {
+    if count == 0 || (address & (FLASH_PAGE_SIZE - 1)) + count > FLASH_PAGE_SIZE || !IsWritableFlash(address, count) {
+        return false;
+    }
+
+    let start = address & 0xFFFFFFFC;
+    let length = ((address + count + 3) & 0xFFFFFFFC) - start;
+    let mut i: u32 = 0;
+
+    while i < length {
+        flash_page[i as usize] = 0xFF;
+        i += 1;
+    }
+
+    i = 0;
+
+    while i < count {
+        flash_page[(((address + i) ^ 3) - start) as usize] = data[i as usize];
+        i += 1;
+    }
+
+    EnableFlashWrite();
+    let interrupts = DisableInterrupts();
+    SelectFlash();
+    SendFlashCommand(FLASH_PAGE_PROGRAM, start);
+    i = 0;
+
+    while i < length {
+        TransferFlashByte(flash_page[i as usize] as u32);
+        i += 1;
+    }
+
+    DeselectFlash();
+    RestoreInterrupts(interrupts);
+    WaitForFlash()
+}
+
+fn ProgramFlash(mut address: u32, mut data: *u8, mut count: u32) -> bool {
+    while count > 0 {
+        let room = FLASH_PAGE_SIZE - (address & (FLASH_PAGE_SIZE - 1));
+        let length = if count < room { count } else { room };
+
+        if !ProgramFlashPage(address, data, length) {
+            return false;
+        }
+
+        address += length;
+        data += length as usize;
+        count -= length;
+    }
+
+    true
+}

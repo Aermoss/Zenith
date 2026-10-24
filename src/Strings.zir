@@ -57,6 +57,24 @@ fn ParseCommand(mut line: *i8, mut name: *i8, arguments: *mut *i8) -> bool {
     true
 }
 
+fn ParseWord(text: *i8, buffer: *mut i8, length: u32) -> *i8 {
+    let mut current = SkipSpaces(text);
+    let mut count: u32 = 0;
+
+    while *current != '\0' && *current != ' ' {
+        if count + 1 >= length {
+            return null;
+        }
+
+        buffer[count as usize] = *current;
+        current += 1;
+        count += 1;
+    }
+
+    buffer[count as usize] = '\0';
+    if count == 0 { null } else { current }
+}
+
 fn ParseNumber(text: *i8, value: *mut u32) -> *i8 {
     let mut current = SkipSpaces(text);
     let mut base: u32 = 10;

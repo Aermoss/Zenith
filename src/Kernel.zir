@@ -34,6 +34,7 @@ fn Panic(message: *i8) {
 fn Main(image_end: u32) {
     SetBaudRate(BAUD_RATE);
     SetLEDs(0x3F);
+    InitializeScreen();
     InitializeMemory(image_end);
     InitializeFileSystem();
     InitializeProcesses();

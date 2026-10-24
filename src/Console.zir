@@ -14,13 +14,14 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Process.zir", "src/Strings.zir" : *]
+#[include "src/Devices.zir", "src/Process.zir", "src/Strings.zir", "src/Video.zir" : *]
 
 const BAUD_RATE: u32 = 115200;
 
 fn WriteCharacter(character: i8) {
     while (*(UART_STATUS as *u32) & 2) != 0 {}
     *(UART_DATA as *mut i8) = character;
+    ScreenCharacter(character);
 }
 
 fn Write(mut string: *i8) {

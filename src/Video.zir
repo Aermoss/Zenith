@@ -1,0 +1,136 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "src/Trap.zir" : *]
+
+const VIDEO_TEXT: u32 = 0x8000;
+const VIDEO_CURSOR: u32 = 0xFFD0;
+const VIDEO_SCROLL: u32 = 0xFFCC;
+const SCREEN_COLUMNS: u32 = 80;
+const SCREEN_ROWS: u32 = 30;
+const CURSOR_ON: u32 = 0x8000;
+
+const DEFAULT_ATTRIBUTE: u32 = 0x07;
+
+const ESCAPE_NONE: u32 = 0;
+const ESCAPE_STARTED: u32 = 1;
+const ESCAPE_SEQUENCE: u32 = 2;
+
+static mut screen_column: u32 = 0;
+static mut screen_row: u32 = 0;
+static mut screen_scroll: u32 = 0;
+static mut screen_attribute: u32 = DEFAULT_ATTRIBUTE;
+static mut escape_state: u32 = ESCAPE_NONE;
+static mut escape_parameter: u32 = 0;
+
+fn SetCell(row: u32, column: u32, character: u32) {
+    let shown_row = (row + screen_scroll) % SCREEN_ROWS;
+    let cell = (VIDEO_TEXT + (shown_row * SCREEN_COLUMNS + column) * 4) as *mut u32;
+    *cell = (screen_attribute << 8) | character;
+}
+
+fn ClearRow(row: u32, from: u32) {
+    let mut column = from;
+
+    while column < SCREEN_COLUMNS {
+        SetCell(row, column, ' ' as u32);
+        column += 1;
+    }
+}
+
+fn UpdateCursor() {
+    *(VIDEO_CURSOR as *mut u32) = CURSOR_ON | (screen_row << 8) | screen_column;
+}
+
+fn ClearScreen() {
+    screen_scroll = 0;
+    *(VIDEO_SCROLL as *mut u32) = 0;
+    let mut row: u32 = 0;
+
+    while row < SCREEN_ROWS {
+        ClearRow(row, 0);
+        row += 1;
+    }
+
+    (screen_row, screen_column) = (0, 0);
+}
+
+fn NewLine() {
+    screen_column = 0;
+
+    if screen_row + 1 < SCREEN_ROWS {
+        screen_row += 1;
+        return;
+    }
+
+    screen_scroll = (screen_scroll + 1) % SCREEN_ROWS;
+    *(VIDEO_SCROLL as *mut u32) = screen_scroll;
+    ClearRow(SCREEN_ROWS - 1, 0);
+}
+
+fn HandleEscape(character: i8) {
+    if escape_state == ESCAPE_STARTED {
+        escape_state = if character == '[' { ESCAPE_SEQUENCE } else { ESCAPE_NONE };
+        escape_parameter = 0;
+    } else if character >= '0' && character <= '9' {
+        escape_parameter = escape_parameter * 10 + (character - '0') as u32;
+    } else if character != ';' {
+        escape_state = ESCAPE_NONE;
+
+        if character == 'J' && escape_parameter == 2 {
+            ClearScreen();
+        } else if character == 'H' {
+            (screen_row, screen_column) = (0, 0);
+        } else if character == 'K' {
+            ClearRow(screen_row, screen_column);
+        }
+    }
+}
+
+fn ScreenCharacter(character: i8) {
+    let interrupts = DisableInterrupts();
+
+    if escape_state != ESCAPE_NONE {
+        HandleEscape(character);
+    } else if character == '\x1B' {
+        escape_state = ESCAPE_STARTED;
+    } else if character == '\n' {
+        NewLine();
+    } else if character == '\r' {
+        screen_column = 0;
+    } else if character == '\x08' {
+        if screen_column > 0 {
+            screen_column -= 1;
+        }
+    } else if character < '\0' || character >= ' ' {
+        SetCell(screen_row, screen_column, (character as u8) as u32);
+        screen_column += 1;
+
+        if screen_column == SCREEN_COLUMNS {
+            NewLine();
+        }
+    }
+
+    UpdateCursor();
+    RestoreInterrupts(interrupts);
+}
+
+fn InitializeScreen() {
+    screen_attribute = DEFAULT_ATTRIBUTE;
+    escape_state = ESCAPE_NONE;
+    ClearScreen();
+    UpdateCursor();
+}

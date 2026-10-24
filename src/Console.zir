@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Process.zir" : *]
+#[include "src/Devices.zir", "src/Process.zir", "src/Strings.zir" : *]
 
 const BAUD_RATE: u32 = 115200;
 
@@ -196,13 +196,88 @@ fn DeleteCharacter(buffer: *mut i8, cursor: usize, count: usize) -> usize {
     count - 1
 }
 
+const HISTORY_SIZE: u32 = 16;
+const HISTORY_LINE_LENGTH: usize = 128;
+
+static mut history: [i8; 2048];
+static mut history_count: u32 = 0;
+static mut history_next: u32 = 0;
+static mut history_draft: [i8; 128];
+
+fn HistorySlot(slot: u32) -> *mut i8 {
+    &mut history[slot as usize * HISTORY_LINE_LENGTH]
+}
+
+fn HistoryLine(age: u32) -> *i8 {
+    HistorySlot((history_next + HISTORY_SIZE - age) % HISTORY_SIZE) as *i8
+}
+
+fn CopyLine(destination: *mut i8, mut source: *i8, length: usize) -> usize {
+    let mut count: usize = 0;
+
+    while *source != '\0' && count < length - 1 {
+        destination[count] = *source;
+        source += 1;
+        count += 1;
+    }
+
+    destination[count] = '\0';
+    count
+}
+
+fn AddHistory(line: *i8) {
+    if *line == '\0' || (history_count > 0 && Equals(line, HistoryLine(1))) {
+        return;
+    }
+
+    CopyLine(HistorySlot(history_next), line, HISTORY_LINE_LENGTH);
+    history_next = (history_next + 1) % HISTORY_SIZE;
+
+    if history_count < HISTORY_SIZE {
+        history_count += 1;
+    }
+}
+
+fn ReplaceLine(buffer: *mut i8, length: usize, cursor: usize, count: usize, text: *i8) -> usize {
+    MoveCursorLeft(cursor);
+    let new_count = CopyLine(buffer, text, length);
+    WriteCharacters(buffer, 0, new_count);
+    let mut i = new_count;
+
+    while i < count {
+        WriteCharacter(' ');
+        i += 1;
+    }
+
+    if count > new_count {
+        MoveCursorLeft(count - new_count);
+    }
+
+    new_count
+}
+
 fn ReadLine(buffer: *mut i8, length: usize) -> usize {
     let mut count: usize = 0;
     let mut cursor: usize = 0;
+    let mut age: u32 = 0;
     let mut key = ReadKey();
 
     while key != '\r' && key != '\n' {
-        if key == KEY_LEFT && cursor > 0 {
+        if key == KEY_UP && age < history_count {
+            if age == 0 {
+                buffer[count] = '\0';
+                CopyLine(&mut history_draft[0], buffer as *i8, HISTORY_LINE_LENGTH);
+            }
+
+            age += 1;
+            count = ReplaceLine(buffer, length, cursor, count, HistoryLine(age));
+            cursor = count;
+        } else if key == KEY_DOWN && age > 0 {
+            age -= 1;
+            let text = if age == 0 { &history_draft[0] as *i8 } else { HistoryLine(age) };
+            count = ReplaceLine(buffer, length, cursor, count, text);
+            cursor = count;
+        } else if key == KEY_LEFT && cursor > 0 {
             cursor -= 1;
             WriteCharacter('\x08');
         } else if key == KEY_RIGHT && cursor < count {

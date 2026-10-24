@@ -388,6 +388,7 @@ fn RunShell(argument: u32) {
     loop {
         Write("zenith> ");
         ReadLine(&mut line[0], LINE_LENGTH);
+        AddHistory(&line[0] as *i8);
         RunCommand(&line[0] as *i8);
     }
 }

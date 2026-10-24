@@ -10,7 +10,7 @@
 .extern Schedule
 
 TrapEntry:
-    addi sp, sp, -152
+    addi sp, sp, -132
     sw ra, 4(sp)
     sw gp, 12(sp)
     sw tp, 16(sp)
@@ -86,14 +86,14 @@ RestoreContext:
     lw a5, 116(sp)
     lw a6, 120(sp)
     lw a7, 124(sp)
-    addi sp, sp, 152
+    addi sp, sp, 132
     eret
 
 Yield:
     csrr t0, status
     andi t1, t0, 0xFFFE
     csrw status, t1
-    addi sp, sp, -152
+    addi sp, sp, -132
     sw ra, 0(sp)
     sw ra, 4(sp)
     sw gp, 12(sp)

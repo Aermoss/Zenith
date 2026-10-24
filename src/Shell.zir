@@ -267,18 +267,12 @@ fn WriteIntegerColumn(value: u32, width: u32) {
 }
 
 fn StateName(id: u32) -> *i8 {
-    let state = processes[id as usize].state;
-
-    if id == current_process {
-        "running"
-    } else if state == PROCESS_READY {
-        "ready"
-    } else if state == PROCESS_SLEEPING {
-        "sleeping"
-    } else if state == PROCESS_WAITING {
-        "waiting"
-    } else {
-        "crashed"
+    match processes[id as usize].state {
+        ProcessState::Free => "free",
+        ProcessState::Ready => if id == current_process { "running" } else { "ready" },
+        ProcessState::Sleeping => "sleeping",
+        ProcessState::Waiting => "waiting",
+        ProcessState::Crashed => "crashed"
     }
 }
 
@@ -289,7 +283,7 @@ fn CommandProcesses() {
     while id < MAX_PROCESSES {
         let process = &processes[id as usize];
 
-        if process.state != PROCESS_FREE {
+        if process.state != ProcessState::Free {
             WriteIntegerColumn(id, 5);
             WriteColumn(StateName(id), 10);
             WriteIntegerColumn(process.ticks, 10);

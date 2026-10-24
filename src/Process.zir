@@ -30,24 +30,24 @@ const STACKS_END: u32 = 0x00004000;
 const STACKS_START: u32 = STACKS_END - BRAM_STACKS * STACK_SIZE;
 const STACK_CANARY: u32 = 0x5AFE57AC;
 
-const FRAME_SIZE: u32 = 152;
-const FRAME_WORDS: u32 = 34;
-const FRAME_EPC: u32 = 0;
-const FRAME_RA: u32 = 1;
-const FRAME_A0: u32 = 24;
-const FRAME_STATUS: u32 = 32;
-
 const STATUS_PREVIOUS_ENABLE: u32 = 2;
 
-const PROCESS_FREE: u32 = 0;
-const PROCESS_READY: u32 = 1;
-const PROCESS_SLEEPING: u32 = 2;
-const PROCESS_WAITING: u32 = 3;
-const PROCESS_CRASHED: u32 = 4;
+class Frame {
+    pub epc: u32,
+    pub ra: u32, pub sp: u32, pub gp: u32, pub tp: u32, pub fp: u32,
+    pub s1: u32, pub s2: u32, pub s3: u32, pub s4: u32, pub s5: u32, pub s6: u32, pub s7: u32, pub s8: u32, pub s9: u32, pub s10: u32, pub s11: u32,
+    pub t0: u32, pub t1: u32, pub t2: u32, pub t3: u32, pub t4: u32, pub t5: u32, pub t6: u32,
+    pub a0: u32, pub a1: u32, pub a2: u32, pub a3: u32, pub a4: u32, pub a5: u32, pub a6: u32, pub a7: u32,
+    pub status: u32
+}
+
+enum ProcessState: u32 {
+    Free, Ready, Sleeping, Waiting, Crashed
+}
 
 class Process {
-    pub state: u32,
-    pub frame: u32,
+    pub state: ProcessState,
+    pub frame: *mut Frame,
     pub wake_tick: u32,
     pub ticks: u32,
     pub name: *i8,
@@ -86,7 +86,7 @@ fn SetStack(id: u32, bottom: u32) {
 
 fn InitializeProcesses() {
     current_process = 0;
-    processes[0].state = PROCESS_READY;
+    processes[0].state = ProcessState::Ready;
     processes[0].name = "idle";
     SetStack(0, AllocateStack(0));
 }
@@ -95,7 +95,7 @@ fn Spawn(name: *i8, entry: ProcessEntry, argument: u32) -> u32 {
     let interrupts = DisableInterrupts();
     let mut id: u32 = 1;
 
-    while id < MAX_PROCESSES && processes[id as usize].state != PROCESS_FREE && processes[id as usize].state != PROCESS_CRASHED {
+    while id < MAX_PROCESSES && processes[id as usize].state != ProcessState::Free && processes[id as usize].state != ProcessState::Crashed {
         id += 1;
     }
 
@@ -104,9 +104,9 @@ fn Spawn(name: *i8, entry: ProcessEntry, argument: u32) -> u32 {
         return NO_PROCESS;
     }
 
-    if processes[id as usize].state == PROCESS_CRASHED {
+    if processes[id as usize].state == ProcessState::Crashed {
         ReleaseStack(id);
-        processes[id as usize].state = PROCESS_FREE;
+        processes[id as usize].state = ProcessState::Free;
     }
 
     let stack = AllocateStack(id);
@@ -117,24 +117,23 @@ fn Spawn(name: *i8, entry: ProcessEntry, argument: u32) -> u32 {
     }
 
     SetStack(id, stack);
-    let frame = (stack + STACK_SIZE - FRAME_SIZE) as *mut u32;
-    let mut i: u32 = 0;
+    let frame = (stack + STACK_SIZE - sizeof(Frame) as u32) as *mut Frame;
+    let words = frame as *mut u32;
 
-    while i < FRAME_WORDS {
-        frame[i as usize] = 0;
-        i += 1;
+    for i in 0..sizeof(Frame) / 4 {
+        words[i] = 0;
     }
 
-    frame[FRAME_EPC as usize] = entry as *void as u32;
-    frame[FRAME_RA as usize] = ExitProcess as *void as u32;
-    frame[FRAME_A0 as usize] = argument;
-    frame[FRAME_STATUS as usize] = STATUS_PREVIOUS_ENABLE;
+    frame->epc = entry as *void as u32;
+    frame->ra = ExitProcess as *void as u32;
+    frame->a0 = argument;
+    frame->status = STATUS_PREVIOUS_ENABLE;
 
     let process = &mut processes[id as usize];
-    process.frame = frame as u32;
+    process.frame = frame;
     process.ticks = 0;
     process.name = name;
-    process.state = PROCESS_READY;
+    process.state = ProcessState::Ready;
     RestoreInterrupts(interrupts);
     id
 }
@@ -142,7 +141,7 @@ fn Spawn(name: *i8, entry: ProcessEntry, argument: u32) -> u32 {
 fn ExitProcess() {
     DisableInterrupts();
     ReleaseStack(current_process);
-    processes[current_process as usize].state = PROCESS_FREE;
+    processes[current_process as usize].state = ProcessState::Free;
     Yield();
 }
 
@@ -152,13 +151,13 @@ fn Kill(id: u32) -> bool {
     }
 
     let interrupts = DisableInterrupts();
-    let killed = processes[id as usize].state != PROCESS_FREE;
+    let killed = processes[id as usize].state != ProcessState::Free;
 
     if killed {
         ReleaseStack(id);
     }
 
-    processes[id as usize].state = PROCESS_FREE;
+    processes[id as usize].state = ProcessState::Free;
     RestoreInterrupts(interrupts);
     killed
 }
@@ -167,13 +166,13 @@ fn Sleep(milliseconds: u32) {
     let interrupts = DisableInterrupts();
     let process = &mut processes[current_process as usize];
     process.wake_tick = ticks + (milliseconds + MILLISECONDS_PER_TICK - 1) / MILLISECONDS_PER_TICK;
-    process.state = PROCESS_SLEEPING;
+    process.state = ProcessState::Sleeping;
     Yield();
     RestoreInterrupts(interrupts);
 }
 
 fn WaitForInput() {
-    processes[current_process as usize].state = PROCESS_WAITING;
+    processes[current_process as usize].state = ProcessState::Waiting;
     Yield();
 }
 
@@ -183,8 +182,8 @@ fn WakeSleepingProcesses() {
     while id < MAX_PROCESSES {
         let process = &mut processes[id as usize];
 
-        if process.state == PROCESS_SLEEPING && ((ticks - process.wake_tick) as i32) >= 0 {
-            process.state = PROCESS_READY;
+        if process.state == ProcessState::Sleeping && ((ticks - process.wake_tick) as i32) >= 0 {
+            process.state = ProcessState::Ready;
         }
 
         id += 1;
@@ -198,8 +197,8 @@ fn WakeWaitingProcesses() -> u32 {
     while id < MAX_PROCESSES {
         let process = &mut processes[id as usize];
 
-        if process.state == PROCESS_WAITING {
-            process.state = PROCESS_READY;
+        if process.state == ProcessState::Waiting {
+            process.state = ProcessState::Ready;
 
             if woken == NO_PROCESS {
                 woken = id;
@@ -212,23 +211,23 @@ fn WakeWaitingProcesses() -> u32 {
     woken
 }
 
-fn SaveContext(frame: u32) {
+fn SaveContext(frame: *mut Frame) {
     let process = &mut processes[current_process as usize];
     process.frame = frame;
 
-    if process.state != PROCESS_FREE && *(process.stack_bottom as *u32) != STACK_CANARY {
-        process.state = PROCESS_CRASHED;
+    if process.state != ProcessState::Free && *(process.stack_bottom as *u32) != STACK_CANARY {
+        process.state = ProcessState::Crashed;
     }
 }
 
-fn SwitchTo(frame: u32, id: u32) -> u32 {
+fn SwitchTo(frame: *mut Frame, id: u32) -> *mut Frame {
     SaveContext(frame);
     current_process = id;
     processes[id as usize].frame
 }
 
 @nomangle
-fn Schedule(frame: u32) -> u32 {
+fn Schedule(frame: *mut Frame) -> *mut Frame {
     SaveContext(frame);
     let mut id = current_process;
     let mut i: u32 = 0;
@@ -236,7 +235,7 @@ fn Schedule(frame: u32) -> u32 {
     while i < MAX_PROCESSES {
         id = (id + 1) % MAX_PROCESSES;
 
-        if id != 0 && processes[id as usize].state == PROCESS_READY {
+        if id != 0 && processes[id as usize].state == ProcessState::Ready {
             current_process = id;
             return processes[id as usize].frame;
         }

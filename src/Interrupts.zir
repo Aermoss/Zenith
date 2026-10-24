@@ -35,7 +35,7 @@ fn InitializeInterrupts() {
 }
 
 @nomangle
-fn HandleTrap(cause: u32, frame: u32) -> u32 {
+fn HandleTrap(cause: u32, frame: *mut Frame) -> *mut Frame {
     if cause == CAUSE_TIMER {
         next_tick += TICK_CYCLES;
         SetTimer(next_tick);

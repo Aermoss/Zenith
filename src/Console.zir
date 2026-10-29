@@ -97,6 +97,22 @@ fn ReadCharacter() -> i8 {
     character
 }
 
+@nomangle
+fn ZenithConsoleRead(buffer: *mut i8, length: usize) -> isize {
+    if length == 0 { return 0; }
+    buffer[0] = ReadCharacter();
+    1
+}
+
+@nomangle
+fn ZenithConsoleWrite(buffer: *i8, length: usize) -> isize {
+    for i in 0..length {
+        WriteCharacter(buffer[i]);
+    }
+
+    length as isize
+}
+
 const KEY_HOME: i8 = '\x01';
 const KEY_LEFT: i8 = '\x02';
 const KEY_DELETE: i8 = '\x04';

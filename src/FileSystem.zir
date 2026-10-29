@@ -506,6 +506,134 @@ fn ReadFile(file: *FileEntry, offset: u32, buffer: *mut u8, count: u32) -> u32 {
     length
 }
 
+@nomangle
+fn ZenithPathKind(path: *i8) -> u32 {
+    if !file_system_ready { return 0; }
+    LockFileSystem();
+    let index = FindPath(path);
+    let kind: u32 = if index == NO_ENTRY { 0 } else if IsDirectoryIndex(index) { 2 } else { 1 };
+    UnlockFileSystem();
+    kind
+}
+
+@nomangle
+fn ZenithCanonicalPath(path: *i8, buffer: *mut i8, capacity: usize) -> u32 {
+    if !file_system_ready { return FILE_NO_FILE_SYSTEM; }
+    LockFileSystem();
+    let mut index = FindPath(path);
+
+    if index == NO_ENTRY {
+        UnlockFileSystem();
+        return FILE_NOT_FOUND;
+    }
+
+    let mut components: [u32; 63];
+    let mut count: usize = 0;
+    let mut length: usize = 1;
+
+    while index != ROOT_ENTRY {
+        if index == NO_ENTRY || count == MAX_FILES as usize {
+            UnlockFileSystem();
+            return FILE_BAD_NAME;
+        }
+
+        components[count] = index;
+        count += 1;
+        length += StringLength(FileName(GetFile(index) as *FileEntry)) as usize;
+        if count > 1 { length += 1; }
+        index = IndexOfId(ParentOf(index));
+    }
+
+    if length >= capacity {
+        UnlockFileSystem();
+        return FILE_BAD_NAME;
+    }
+
+    let mut position: usize = 0;
+    buffer[position] = '/';
+    position += 1;
+
+    while count > 0 {
+        count -= 1;
+        let name = FileName(GetFile(components[count]) as *FileEntry);
+        let mut i: usize = 0;
+
+        while name[i] != 0 {
+            buffer[position] = name[i];
+            position += 1;
+            i += 1;
+        }
+
+        if count > 0 {
+            buffer[position] = '/';
+            position += 1;
+        }
+    }
+
+    buffer[position] = 0;
+    UnlockFileSystem();
+    FILE_OK
+}
+
+@nomangle
+fn ZenithReadFile(path: *i8, buffer: *mut u8, capacity: usize, size: *mut usize) -> u32 {
+    if !file_system_ready { return FILE_NO_FILE_SYSTEM; }
+    LockFileSystem();
+    let index = FindPath(path);
+
+    if index == NO_ENTRY {
+        UnlockFileSystem();
+        return FILE_NOT_FOUND;
+    }
+
+    if IsDirectoryIndex(index) {
+        UnlockFileSystem();
+        return FILE_IS_DIRECTORY;
+    }
+
+    let file = GetFile(index) as *FileEntry;
+    *size = file->size as usize;
+
+    if buffer != null && capacity < *size {
+        UnlockFileSystem();
+        return FILE_NO_SPACE;
+    }
+
+    if buffer != null {
+        ReadFileData(file, 0, buffer, file->size);
+    }
+
+    UnlockFileSystem();
+    FILE_OK
+}
+
+@nomangle
+fn ZenithWriteFile(path: *i8, data: *u8, size: usize) -> u32 {
+    WriteFile(path, data, size as u32)
+}
+
+@nomangle
+fn ZenithRemoveFile(path: *i8) -> u32 {
+    if !file_system_ready { return FILE_NO_FILE_SYSTEM; }
+    LockFileSystem();
+    let index = FindPath(path);
+
+    if index == NO_ENTRY {
+        UnlockFileSystem();
+        return FILE_NOT_FOUND;
+    }
+
+    if IsDirectoryIndex(index) {
+        UnlockFileSystem();
+        return FILE_IS_DIRECTORY;
+    }
+
+    RemoveEntry(index);
+    let result = CommitOrRestore();
+    UnlockFileSystem();
+    result
+}
+
 fn MarkBlocks(first: u32, count: u32) {
     let mut block = first;
 

@@ -10,7 +10,7 @@ IMAGER := bin/Imager.exe
 default: build
 
 src/Kernel.s: src/Kernel.zir $(wildcard src/*.zir)
-	$(COMPILER) $< -o $@ -S -target zodiac
+	$(COMPILER) $< -o $@ -S -target zodiac -DZENITH -DZENITH_COMPILER -DZENITH_UNIFIED -I$(ZIRCON_PATH) -I$(ZIRCON_PATH)/include
 
 bin/%.o: src/%.s
 	$(ASSEMBLER) $< -o $@

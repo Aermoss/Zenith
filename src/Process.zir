@@ -59,15 +59,19 @@ static mut processes: [Process; 16];
 static mut current_process: u32 = 0;
 static mut ticks: u32 = 0;
 
+fn ZenithCurrentProcess() -> u32 {
+    current_process
+}
+
 fn IsStackInBRAM(id: u32) -> bool {
     processes[id as usize].stack_bottom < STACKS_END
 }
 
-fn AllocateStack(id: u32) -> u32 {
-    if id < BRAM_STACKS {
+fn AllocateStack(id: u32, size: u32) -> u32 {
+    if id < BRAM_STACKS && size == STACK_SIZE {
         STACKS_END - (id + 1) * STACK_SIZE
     } else {
-        Allocate(STACK_SIZE) as u32
+        Allocate(size) as u32
     }
 }
 
@@ -77,10 +81,10 @@ fn ReleaseStack(id: u32) {
     }
 }
 
-fn SetStack(id: u32, bottom: u32) {
+fn SetStack(id: u32, bottom: u32, size: u32) {
     let process = &mut processes[id as usize];
     process.stack_bottom = bottom;
-    process.stack_top = bottom + STACK_SIZE;
+    process.stack_top = bottom + size;
     *(bottom as *mut u32) = STACK_CANARY;
 }
 
@@ -88,10 +92,19 @@ fn InitializeProcesses() {
     current_process = 0;
     processes[0].state = ProcessState::Ready;
     processes[0].name = "idle";
-    SetStack(0, AllocateStack(0));
+    SetStack(0, AllocateStack(0, STACK_SIZE), STACK_SIZE);
 }
 
 fn Spawn(name: *i8, entry: ProcessEntry, argument: u32) -> u32 {
+    SpawnWithStack(name, entry, argument, STACK_SIZE)
+}
+
+fn SpawnWithStack(name: *i8, entry: ProcessEntry, argument: u32, mut stack_size: u32) -> u32 {
+    if stack_size < sizeof(Frame) as u32 + 8 || stack_size > 0xFFFFFFF8 {
+        return NO_PROCESS;
+    }
+
+    stack_size = (stack_size + 7) & !7u32;
     let interrupts = DisableInterrupts();
     let mut id: u32 = 1;
 
@@ -109,15 +122,15 @@ fn Spawn(name: *i8, entry: ProcessEntry, argument: u32) -> u32 {
         processes[id as usize].state = ProcessState::Free;
     }
 
-    let stack = AllocateStack(id);
+    let stack = AllocateStack(id, stack_size);
 
     if stack == 0 {
         RestoreInterrupts(interrupts);
         return NO_PROCESS;
     }
 
-    SetStack(id, stack);
-    let frame = (stack + STACK_SIZE - sizeof(Frame) as u32) as *mut Frame;
+    SetStack(id, stack, stack_size);
+    let frame = (stack + stack_size - sizeof(Frame) as u32) as *mut Frame;
     let words = frame as *mut u32;
 
     for i in 0..sizeof(Frame) / 4 {
@@ -143,6 +156,12 @@ fn ExitProcess() {
     ReleaseStack(current_process);
     processes[current_process as usize].state = ProcessState::Free;
     Yield();
+}
+
+@nomangle
+fn ZenithExit(status: i32) -> ! {
+    ExitProcess();
+    loop {}
 }
 
 fn Kill(id: u32) -> bool {

@@ -122,6 +122,16 @@ fn Free(pointer: *mut u8) -> bool {
     found
 }
 
+@nomangle
+fn ZenithAllocate(size: usize) -> *mut void {
+    Allocate(size as u32) as *mut void
+}
+
+@nomangle
+fn ZenithFree(pointer: *mut void) {
+    Free(pointer as *mut u8);
+}
+
 fn GetHeapStatistics(used: *mut u32, free: *mut u32, largest_free: *mut u32) {
     let interrupts = DisableInterrupts();
     let mut block = heap_start;

@@ -24,7 +24,7 @@ const BLOCK_SIZE: u32 = 4096;
 const TABLE_BLOCKS: u32 = 8;
 const TABLE_PAGE: u32 = 256;
 const MAX_BLOCKS: u32 = (FLASH_WRITABLE_END - FILE_SYSTEM_OFFSET) / BLOCK_SIZE;
-const DEFAULT_BLOCKS: u32 = 256;
+const DEFAULT_BLOCKS: u32 = 512;
 
 const TABLE_HEADER_SIZE: u32 = 32;
 const FILE_ENTRY_SIZE: u32 = 64;
@@ -482,8 +482,23 @@ fn ReadFileData(file: *FileEntry, offset: u32, buffer: *mut u8, count: u32) -> u
 
     let length = if count < file->size - offset { count } else { file->size - offset };
     let start = FILE_SYSTEM_START + file->first_block * BLOCK_SIZE + offset;
-    let mut word: u32 = 0;
     let mut i: u32 = 0;
+
+    if ((start | (buffer as u32)) & 3) == 0 {
+        let source = start as *u32;
+        let destination = buffer as *mut u32;
+        let words = length / 4;
+        let mut w: u32 = 0;
+
+        while w < words {
+            destination[w as usize] = source[w as usize];
+            w += 1;
+        }
+
+        i = words * 4;
+    }
+
+    let mut word: u32 = 0;
 
     while i < length {
         let address = start + i;
@@ -506,8 +521,7 @@ fn ReadFile(file: *FileEntry, offset: u32, buffer: *mut u8, count: u32) -> u32 {
     length
 }
 
-@nomangle
-fn ZenithPathKind(path: *i8) -> u32 {
+fn GetPathKind(path: *i8) -> u32 {
     if !file_system_ready { return 0; }
     LockFileSystem();
     let index = FindPath(path);
@@ -516,8 +530,7 @@ fn ZenithPathKind(path: *i8) -> u32 {
     kind
 }
 
-@nomangle
-fn ZenithCanonicalPath(path: *i8, buffer: *mut i8, capacity: usize) -> u32 {
+fn GetCanonicalPath(path: *i8, buffer: *mut i8, capacity: usize) -> u32 {
     if !file_system_ready { return FILE_NO_FILE_SYSTEM; }
     LockFileSystem();
     let mut index = FindPath(path);
@@ -575,8 +588,7 @@ fn ZenithCanonicalPath(path: *i8, buffer: *mut i8, capacity: usize) -> u32 {
     FILE_OK
 }
 
-@nomangle
-fn ZenithReadFile(path: *i8, buffer: *mut u8, capacity: usize, size: *mut usize) -> u32 {
+fn ReadWholeFile(path: *i8, buffer: *mut u8, capacity: usize, size: *mut usize) -> u32 {
     if !file_system_ready { return FILE_NO_FILE_SYSTEM; }
     LockFileSystem();
     let index = FindPath(path);
@@ -607,13 +619,7 @@ fn ZenithReadFile(path: *i8, buffer: *mut u8, capacity: usize, size: *mut usize)
     FILE_OK
 }
 
-@nomangle
-fn ZenithWriteFile(path: *i8, data: *u8, size: usize) -> u32 {
-    WriteFile(path, data, size as u32)
-}
-
-@nomangle
-fn ZenithRemoveFile(path: *i8) -> u32 {
+fn RemoveFile(path: *i8) -> u32 {
     if !file_system_ready { return FILE_NO_FILE_SYSTEM; }
     LockFileSystem();
     let index = FindPath(path);

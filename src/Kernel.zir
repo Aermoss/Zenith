@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Console.zir", "src/Memory.zir", "src/Process.zir", "src/Interrupts.zir", "src/Animation.zir", "src/FileSystem.zir", "src/Shell.zir" : *]
+#[include "src/Devices.zir", "src/Console.zir", "src/Memory.zir", "src/Process.zir", "src/Interrupts.zir", "src/Animation.zir", "src/FileSystem.zir", "src/Executable.zir", "src/Shell.zir" : *]
 
 @nomangle
 fn Main(image_end: u32) {

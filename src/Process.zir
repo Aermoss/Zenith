@@ -51,6 +51,9 @@ class Process {
     pub wake_tick: u32,
     pub ticks: u32,
     pub name: *i8,
+    pub label: [i8; 32],
+    pub arguments: [i8; 128],
+    pub image: *mut u8,
     pub stack_bottom: u32,
     pub stack_top: u32
 }
@@ -58,10 +61,6 @@ class Process {
 static mut processes: [Process; 16];
 static mut current_process: u32 = 0;
 static mut ticks: u32 = 0;
-
-fn ZenithCurrentProcess() -> u32 {
-    current_process
-}
 
 fn IsStackInBRAM(id: u32) -> bool {
     processes[id as usize].stack_bottom < STACKS_END
@@ -76,8 +75,15 @@ fn AllocateStack(id: u32, size: u32) -> u32 {
 }
 
 fn ReleaseStack(id: u32) {
+    FreeProcessAllocations(id);
+
     if !IsStackInBRAM(id) {
         Free(processes[id as usize].stack_bottom as *mut u8);
+    }
+
+    if processes[id as usize].image != null {
+        Free(processes[id as usize].image);
+        processes[id as usize].image = null;
     }
 }
 
@@ -146,9 +152,60 @@ fn SpawnWithStack(name: *i8, entry: ProcessEntry, argument: u32, mut stack_size:
     process.frame = frame;
     process.ticks = 0;
     process.name = name;
+    process.image = null;
     process.state = ProcessState::Ready;
     RestoreInterrupts(interrupts);
     id
+}
+
+fn SpawnImage(name: *i8, arguments: *i8, image: *mut u8, entry: u32, stack_size: u32) -> u32 {
+    let interrupts = DisableInterrupts();
+    let id = SpawnWithStack(name, entry as *void as ProcessEntry, 0, stack_size);
+
+    if id != NO_PROCESS {
+        let process = &mut processes[id as usize];
+        let mut i: usize = 0;
+
+        while i < 31 && name[i] != '\0' {
+            process.label[i] = name[i];
+            i += 1;
+        }
+
+        process.label[i] = '\0';
+        process.name = &process.label[0] as *i8;
+        let mut j: usize = 0;
+
+        if arguments != null {
+            while j < 127 && arguments[j] != '\0' {
+                process.arguments[j] = arguments[j];
+                j += 1;
+            }
+        }
+
+        process.arguments[j] = '\0';
+        process.image = image;
+    }
+
+    RestoreInterrupts(interrupts);
+    id
+}
+
+@nomangle
+fn GetCommandLine(buffer: *mut i8, capacity: usize) -> usize {
+    if buffer == null || capacity == 0 {
+        return 0;
+    }
+
+    let source = &processes[current_process as usize].arguments[0] as *i8;
+    let mut i: usize = 0;
+
+    while i + 1 < capacity && source[i] != '\0' {
+        buffer[i] = source[i];
+        i += 1;
+    }
+
+    buffer[i] = '\0';
+    i
 }
 
 fn ExitProcess() {
@@ -156,12 +213,6 @@ fn ExitProcess() {
     ReleaseStack(current_process);
     processes[current_process as usize].state = ProcessState::Free;
     Yield();
-}
-
-@nomangle
-fn ZenithExit(status: i32) -> ! {
-    ExitProcess();
-    loop {}
 }
 
 fn Kill(id: u32) -> bool {

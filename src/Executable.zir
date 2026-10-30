@@ -1,0 +1,115 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "src/Memory.zir", "src/Process.zir", "src/FileSystem.zir" : *]
+
+const EXECUTABLE_MAGIC: u32 = 0x4558455A;
+const EXECUTABLE_STACK_SIZE: u32 = 256 * 1024;
+
+enum ExecutableError: u32 {
+    None, InvalidFormat, OutOfMemory, ProcessLimitReached
+}
+
+class ExecutableHeader {
+    pub magic: u32,
+    pub entry: u32,
+    pub code_words: u32,
+    pub relocation_count: u32
+}
+
+fn SpawnExecutable(file: *FileEntry, arguments: *i8, process: *mut u32) -> ExecutableError {
+    let header_size = sizeof(ExecutableHeader) as u32;
+
+    if file == null || file->size < header_size || (file->size & 3) != 0 {
+        return ExecutableError::InvalidFormat;
+    }
+
+    let mut header: ExecutableHeader;
+
+    if ReadFile(file, 0, &mut header as *mut u8, header_size) != header_size {
+        return ExecutableError::InvalidFormat;
+    }
+
+    let payload_words = (file->size - header_size) / 4;
+
+    if header.magic != EXECUTABLE_MAGIC || header.code_words == 0 || header.code_words > payload_words {
+        return ExecutableError::InvalidFormat;
+    }
+
+    if header.relocation_count != payload_words - header.code_words {
+        return ExecutableError::InvalidFormat;
+    }
+
+    let code_size = header.code_words * 4;
+
+    if header.entry >= code_size || (header.entry & 3) != 0 {
+        return ExecutableError::InvalidFormat;
+    }
+
+    let image = Allocate(code_size);
+
+    if image == null {
+        return ExecutableError::OutOfMemory;
+    }
+
+    if ReadFile(file, header_size, image, code_size) != code_size {
+        Free(image);
+        return ExecutableError::InvalidFormat;
+    }
+
+    let base = image as u32;
+    let relocation_start = header_size + code_size;
+    let mut batch: [u32; 64];
+    let mut i: u32 = 0;
+
+    while i < header.relocation_count {
+        let remaining = header.relocation_count - i;
+        let count = if remaining < 64 { remaining } else { 64 };
+        let bytes = count * 4;
+
+        if ReadFile(file, relocation_start + i * 4, &mut batch[0] as *mut u8, bytes) != bytes {
+            Free(image);
+            return ExecutableError::InvalidFormat;
+        }
+
+        let mut j: u32 = 0;
+
+        while j < count {
+            let offset = batch[j as usize];
+
+            if offset >= code_size || (offset & 3) != 0 {
+                Free(image);
+                return ExecutableError::InvalidFormat;
+            }
+
+            let target = (image + offset as usize) as *mut u32;
+            *target += base;
+            j += 1;
+        }
+
+        i += count;
+    }
+
+    let id = SpawnImage(FileName(file), arguments, image, base + header.entry, EXECUTABLE_STACK_SIZE);
+
+    if id == NO_PROCESS {
+        Free(image);
+        return ExecutableError::ProcessLimitReached;
+    }
+
+    *process = id;
+    ExecutableError::None
+}

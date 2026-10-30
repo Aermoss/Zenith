@@ -24,7 +24,8 @@ const FLASH_START: u32 = 0x80000000;
 const FLASH_END: u32 = 0x80800000;
 
 const HEAP_ALIGNMENT: u32 = 8;
-const BLOCK_HEADER_SIZE: u32 = 8;
+const BLOCK_HEADER_SIZE: u32 = 16;
+const KERNEL_ALLOCATION_OWNER: u32 = 0xFFFFFFFF;
 
 static mut kernel_end: u32 = 0;
 static mut heap_start: u32 = 0;
@@ -42,9 +43,14 @@ fn BlockUsed(block: u32) -> bool {
     *((block + 4) as *u32) != 0
 }
 
-fn SetBlock(block: u32, size: u32, used: bool) {
+fn BlockOwner(block: u32) -> u32 {
+    *((block + 8) as *u32)
+}
+
+fn SetBlock(block: u32, size: u32, used: bool, owner: u32) {
     *(block as *mut u32) = size;
     *((block + 4) as *mut u32) = if used { 1 } else { 0 };
+    *((block + 8) as *mut u32) = owner;
 }
 
 fn NextBlock(block: u32) -> u32 {
@@ -55,10 +61,18 @@ fn InitializeMemory(image_end: u32) {
     kernel_end = image_end;
     heap_start = AlignUp(image_end, HEAP_ALIGNMENT);
     heap_end = SDRAM_END;
-    SetBlock(heap_start, heap_end - heap_start - BLOCK_HEADER_SIZE, false);
+    SetBlock(heap_start, heap_end - heap_start - BLOCK_HEADER_SIZE, false, KERNEL_ALLOCATION_OWNER);
 }
 
 fn Allocate(size: u32) -> *mut u8 {
+    AllocateWithOwner(size, KERNEL_ALLOCATION_OWNER)
+}
+
+fn AllocateForProcess(size: u32, owner: u32) -> *mut u8 {
+    AllocateWithOwner(size, owner)
+}
+
+fn AllocateWithOwner(size: u32, owner: u32) -> *mut u8 {
     let interrupts = DisableInterrupts();
 
     if size == 0 || size > heap_end - heap_start {
@@ -74,10 +88,10 @@ fn Allocate(size: u32) -> *mut u8 {
 
         if !BlockUsed(block) && block_size >= needed {
             if block_size >= needed + BLOCK_HEADER_SIZE + HEAP_ALIGNMENT {
-                SetBlock(block + BLOCK_HEADER_SIZE + needed, block_size - needed - BLOCK_HEADER_SIZE, false);
-                SetBlock(block, needed, true);
+                SetBlock(block + BLOCK_HEADER_SIZE + needed, block_size - needed - BLOCK_HEADER_SIZE, false, KERNEL_ALLOCATION_OWNER);
+                SetBlock(block, needed, true, owner);
             } else {
-                SetBlock(block, block_size, true);
+                SetBlock(block, block_size, true, owner);
             }
 
             RestoreInterrupts(interrupts);
@@ -92,14 +106,22 @@ fn Allocate(size: u32) -> *mut u8 {
 }
 
 fn Free(pointer: *mut u8) -> bool {
+    FreeWithOwner(pointer, KERNEL_ALLOCATION_OWNER, false)
+}
+
+fn FreeForProcess(pointer: *mut u8, owner: u32) -> bool {
+    FreeWithOwner(pointer, owner, true)
+}
+
+fn FreeWithOwner(pointer: *mut u8, owner: u32, check_owner: bool) -> bool {
     let interrupts = DisableInterrupts();
     let address = pointer as u32;
     let mut block = heap_start;
     let mut found = false;
 
     while block < heap_end && !found {
-        if block + BLOCK_HEADER_SIZE == address && BlockUsed(block) {
-            SetBlock(block, BlockSize(block), false);
+        if block + BLOCK_HEADER_SIZE == address && BlockUsed(block) && (!check_owner || BlockOwner(block) == owner) {
+            SetBlock(block, BlockSize(block), false, KERNEL_ALLOCATION_OWNER);
             found = true;
         } else {
             block = NextBlock(block);
@@ -112,7 +134,7 @@ fn Free(pointer: *mut u8) -> bool {
         let next = NextBlock(block);
 
         if next < heap_end && !BlockUsed(block) && !BlockUsed(next) {
-            SetBlock(block, BlockSize(block) + BLOCK_HEADER_SIZE + BlockSize(next), false);
+            SetBlock(block, BlockSize(block) + BLOCK_HEADER_SIZE + BlockSize(next), false, KERNEL_ALLOCATION_OWNER);
         } else {
             block = next;
         }
@@ -120,6 +142,36 @@ fn Free(pointer: *mut u8) -> bool {
 
     RestoreInterrupts(interrupts);
     found
+}
+
+fn FreeProcessAllocations(owner: u32) {
+    let interrupts = DisableInterrupts();
+    let mut block = heap_start;
+
+    while block < heap_end {
+        let block_size = BlockSize(block);
+        let next = block + BLOCK_HEADER_SIZE + block_size;
+
+        if BlockUsed(block) && BlockOwner(block) == owner {
+            SetBlock(block, block_size, false, KERNEL_ALLOCATION_OWNER);
+        }
+
+        block = next;
+    }
+
+    block = heap_start;
+
+    while block < heap_end {
+        let next = NextBlock(block);
+
+        if next < heap_end && !BlockUsed(block) && !BlockUsed(next) {
+            SetBlock(block, BlockSize(block) + BLOCK_HEADER_SIZE + BlockSize(next), false, KERNEL_ALLOCATION_OWNER);
+        } else {
+            block = next;
+        }
+    }
+
+    RestoreInterrupts(interrupts);
 }
 
 @nomangle

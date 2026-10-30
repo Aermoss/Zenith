@@ -97,15 +97,7 @@ fn ReadCharacter() -> i8 {
     character
 }
 
-@nomangle
-fn ZenithConsoleRead(buffer: *mut i8, length: usize) -> isize {
-    if length == 0 { return 0; }
-    buffer[0] = ReadCharacter();
-    1
-}
-
-@nomangle
-fn ZenithConsoleWrite(buffer: *i8, length: usize) -> isize {
+fn WriteBuffer(buffer: *i8, length: usize) -> isize {
     for i in 0..length {
         WriteCharacter(buffer[i]);
     }

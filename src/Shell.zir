@@ -14,12 +14,11 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Console.zir", "src/Strings.zir", "src/Memory.zir", "src/Interrupts.zir", "src/Process.zir", "src/Animation.zir", "src/Programs.zir", "src/FileSystem.zir" : *]
+#[include "src/Devices.zir", "src/Console.zir", "src/Strings.zir", "src/Memory.zir", "src/Interrupts.zir", "src/Process.zir", "src/Animation.zir", "src/Programs.zir", "src/FileSystem.zir", "src/Executable.zir" : *]
 
 const LINE_LENGTH: usize = 128;
 const DUMP_LENGTH: u32 = 64;
 const CAT_BUFFER_SIZE: usize = 64;
-const COMPILER_STACK_SIZE: u32 = 256 * 1024;
 
 fn CommandHelp() {
     WriteLine("help                     show the commands");
@@ -47,7 +46,6 @@ fn CommandHelp() {
     WriteLine("mv <source> <target>     move or rename a file or a directory");
     WriteLine("rm <path>                delete a file or an empty directory");
     WriteLine("df                       show how much of the file system is used");
-    WriteLine("zircon <input> <output>  compile Zircon to Zodiac assembly");
     WriteLine("format                   make an empty file system, the files are lost");
 }
 
@@ -318,6 +316,52 @@ fn CommandProcesses() {
     }
 }
 
+fn RunExecutable(file: *FileEntry, arguments: *i8) {
+    let mut process = NO_PROCESS;
+
+    match SpawnExecutable(file, arguments, &mut process) {
+        ExecutableError::None => {},
+        ExecutableError::InvalidFormat => {
+            WriteLine("Invalid executable format.");
+            return;
+        },
+        ExecutableError::OutOfMemory => {
+            ReportFileError(FILE_NO_MEMORY);
+            return;
+        },
+        ExecutableError::ProcessLimitReached => {
+            WriteLine("There is no room for another process.");
+            return;
+        }
+    }
+
+    while processes[process as usize].state != ProcessState::Free && processes[process as usize].state != ProcessState::Crashed {
+        Sleep(MILLISECONDS_PER_TICK);
+    }
+
+    if processes[process as usize].state == ProcessState::Crashed {
+        Kill(process);
+        WriteLine("Process crashed.");
+    }
+}
+
+fn RunFile(path: *i8, command_line: *i8) {
+    if !HasFileSystem() {
+        ReportFileError(FILE_NO_FILE_SYSTEM);
+        return;
+    }
+
+    let file = FindFile(path);
+
+    if file == null {
+        ReportFileError(FILE_NOT_FOUND);
+    } else if IsDirectory(file) {
+        ReportFileError(FILE_IS_DIRECTORY);
+    } else {
+        RunExecutable(file, command_line);
+    }
+}
+
 fn CommandRun(arguments: *i8) {
     let mut process = NO_PROCESS;
 
@@ -393,107 +437,6 @@ fn ParseTwoPaths(arguments: *i8, usage: *i8) -> bool {
     }
 
     true
-}
-
-#[include "std/file", "src/Lexer.zir", "src/Preprocessor.zir", "src/Parser.zir", "src/HIRLowerer.zir", "src/MIRLowerer.zir", "src/MIRPasses.zir",
-    "src/LIRLowerer.zir", "src/LIRAllocator.zir", "src/ZodiacEmitter.zir", "src/Logger.zir" : *]
-
-fn RunCompiler(argument: u32) {
-#[if ZENITH_UNIFIED]
-    if !BeginCompilerMemory() {
-        WriteLine("The compiler is already running.");
-        return;
-    }
-#[endif]
-    let mut logger = Logger("zirconc".ToString());
-    let input_path = String(&first_path[0] as *i8);
-    let output_path = String(&second_path[0] as *i8);
-    let read_result = _ReadFile(input_path);
-    let source = match read_result {
-        Result<String, IOError>::Ok(source) => source,
-        Result<String, IOError>::Err(error) => {
-            Logger::Log(input_path, "Failed to read file: " + error.ToString() + ".", LogSeverity::Error);
-            ReleaseCompilerMemory();
-            return;
-        }
-    };
-
-    let mut lexer = Lexer();
-    let mut preprocessor = Preprocessor();
-    preprocessor.include_paths.PushBack(".".ToString());
-    preprocessor.include_paths.PushBack("/include".ToString());
-    preprocessor.defines.PushBack("ZODIAC".ToString());
-    preprocessor.defines.PushBack("ZENITH".ToString());
-    let tokens = preprocessor.Process(lexer.Lex(source, input_path), input_path);
-
-    if Logger::HasError() {
-        ReleaseCompilerMemory();
-        return;
-    }
-
-    let mut parser = Parser();
-    let ast_module = parser.Parse(tokens);
-
-    if Logger::HasError() {
-        ReleaseCompilerMemory();
-        return;
-    }
-
-    let mut hir_lowerer = HIRLowerer(TargetInfo(4, 4, 4));
-    let hir_module = hir_lowerer.Lower(ast_module);
-
-    if Logger::HasError() || hir_module == null {
-        ReleaseCompilerMemory();
-        return;
-    }
-
-    let mut mir_lowerer = MIRLowerer(TargetInfo(4, 4, 4));
-    let mir_module = mir_lowerer.Lower(hir_module);
-
-    let mut passes = MIRPassManager(&mut mir_lowerer.context);
-    passes.Add(MIRPassKind::ReorderBlocks);
-    passes.Add(MIRPassKind::PromoteAllocas);
-    passes.Run(mir_module);
-
-    let mut lir_lowerer = LIRLowerer();
-    let lir_module = lir_lowerer.Lower(mir_module);
-
-    let mut allocator = LIRAllocator(&mut lir_lowerer.context);
-    allocator.Allocate(lir_module);
-
-    let mut emitter = ZodiacEmitter();
-    let assembly = emitter.Emit(lir_module);
-
-    if let Result<(), IOError>::Err(error) = _WriteFile(output_path, assembly) {
-        Logger::Log(output_path, "Failed to write file: " + error.ToString() + ".", LogSeverity::Error);
-        ReleaseCompilerMemory();
-        return;
-    }
-
-    ReleaseCompilerMemory();
-}
-
-fn CommandCompile(arguments: *i8) {
-    if !ParseTwoPaths(arguments, "Usage: zircon <input> <output>") {
-        return;
-    }
-
-    let process = SpawnWithStack("zircon", RunCompiler, 0, COMPILER_STACK_SIZE);
-
-    if process == NO_PROCESS {
-        WriteLine("Cannot start the compiler: no process slot or stack memory.");
-        return;
-    }
-
-    while processes[process as usize].state != ProcessState::Free && processes[process as usize].state != ProcessState::Crashed {
-        Sleep(MILLISECONDS_PER_TICK);
-    }
-
-    if processes[process as usize].state == ProcessState::Crashed {
-        ReleaseCompilerMemoryForProcess(process);
-        Kill(process);
-        WriteLine("Compiler process crashed.");
-    }
 }
 
 fn WriteEntry(file: *FileEntry) {
@@ -769,13 +712,17 @@ fn RunCommand(line: *i8) {
         CommandMove(arguments);
     } else if ParseCommand(line, "df", &mut arguments) {
         CommandDiskFree();
-    } else if ParseCommand(line, "zircon", &mut arguments) {
-        CommandCompile(arguments);
     } else if ParseCommand(line, "format", &mut arguments) {
         CommandFormat();
     } else {
-        Write("Unknown command: ");
-        WriteLine(line);
+        let rest = ParseWord(line, &mut first_path[0], LINE_LENGTH as u32);
+
+        if rest == null {
+            Write("Unknown command: ");
+            WriteLine(line);
+        } else {
+            RunFile(&first_path[0] as *i8, line);
+        }
     }
 }
 

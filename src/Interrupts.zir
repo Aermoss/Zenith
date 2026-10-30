@@ -14,13 +14,33 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Trap.zir", "src/Console.zir", "src/Process.zir" : *]
+#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir", "src/Console.zir", "src/FileSystem.zir", "src/Process.zir" : *]
 
 const INTERRUPT_TIMER: u32 = 1;
 const INTERRUPT_UART: u32 = 2;
 
-const CAUSE_TIMER: u32 = 0x80000000;
-const CAUSE_UART: u32 = 0x80000001;
+enum TrapCause: u32 {
+    SystemCall = 0x00000008,
+    Timer = 0x80000000,
+    Uart = 0x80000001,
+    Unknown = 0xFFFFFFFF
+}
+
+enum SystemCall: u32 {
+    Exit = 0,
+    Allocate = 1,
+    Free = 2,
+    ConsoleRead = 3,
+    ConsoleWrite = 4,
+    PathKind = 5,
+    CanonicalPath = 6,
+    ReadFile = 7,
+    WriteFile = 8,
+    RemoveFile = 9,
+    Sleep = 10,
+    CommandLine = 11,
+    Unknown = 0xFFFFFFFF
+}
 
 const TICK_CYCLES: u32 = CLK_FREQ / TICK_RATE;
 
@@ -35,21 +55,83 @@ fn InitializeInterrupts() {
 }
 
 @nomangle
-fn HandleTrap(cause: u32, frame: *mut Frame) -> *mut Frame {
-    if cause == CAUSE_TIMER {
-        next_tick += TICK_CYCLES;
-        SetTimer(next_tick);
-        ticks += 1;
-        processes[current_process as usize].ticks += 1;
-        WakeSleepingProcesses();
-        return Schedule(frame);
-    } else if cause == CAUSE_UART {
-        ReceiveCharacter();
-        let woken = WakeWaitingProcesses();
+fn HandleTrap(cause: TrapCause, frame: *mut Frame) -> *mut Frame {
+    match cause {
+        TrapCause::Timer => {
+            next_tick += TICK_CYCLES;
+            SetTimer(next_tick);
+            ticks += 1;
+            processes[current_process as usize].ticks += 1;
+            WakeSleepingProcesses();
+            return Schedule(frame);
+        },
+        TrapCause::Uart => {
+            ReceiveCharacter();
+            let woken = WakeWaitingProcesses();
 
-        if woken != NO_PROCESS {
-            return SwitchTo(frame, woken);
-        }
+            if woken != NO_PROCESS {
+                return SwitchTo(frame, woken);
+            }
+        },
+        TrapCause::SystemCall => {
+            match frame->a7 as SystemCall {
+                SystemCall::Exit => {
+                    ReleaseStack(current_process);
+                    processes[current_process as usize].state = ProcessState::Free;
+                    return Schedule(frame);
+                },
+                SystemCall::Allocate => {
+                    frame->a0 = AllocateForProcess(frame->a0, current_process) as u32;
+                },
+                SystemCall::Free => {
+                    FreeForProcess(frame->a0 as *mut u8, current_process);
+                },
+                SystemCall::ConsoleRead => {
+                    if frame->a0 == 0 || frame->a1 == 0 {
+                        frame->a0 = 0;
+                    } else if !HasCharacter() {
+                        frame->epc -= 4;
+                        processes[current_process as usize].state = ProcessState::Waiting;
+                        return Schedule(frame);
+                    } else {
+                        (frame->a0 as *mut i8)[0] = ReadCharacter();
+                        frame->a0 = 1;
+                    }
+                },
+                SystemCall::ConsoleWrite => {
+                    frame->a0 = WriteBuffer(frame->a0 as *i8, frame->a1 as usize) as u32;
+                },
+                SystemCall::PathKind => {
+                    frame->a0 = GetPathKind(frame->a0 as *i8);
+                },
+                SystemCall::CanonicalPath => {
+                    frame->a0 = GetCanonicalPath(frame->a0 as *i8, frame->a1 as *mut i8, frame->a2 as usize);
+                },
+                SystemCall::ReadFile => {
+                    frame->a0 = ReadWholeFile(frame->a0 as *i8, frame->a1 as *mut u8, frame->a2 as usize, frame->a3 as *mut usize);
+                },
+                SystemCall::WriteFile => {
+                    frame->a0 = WriteFile(frame->a0 as *i8, frame->a1 as *u8, frame->a2);
+                },
+                SystemCall::RemoveFile => {
+                    frame->a0 = RemoveFile(frame->a0 as *i8);
+                },
+                SystemCall::Sleep => {
+                    let milliseconds = frame->a0;
+                    let process = &mut processes[current_process as usize];
+                    process.wake_tick = ticks + (milliseconds + MILLISECONDS_PER_TICK - 1) / MILLISECONDS_PER_TICK;
+                    process.state = ProcessState::Sleeping;
+                    return Schedule(frame);
+                },
+                SystemCall::CommandLine => {
+                    frame->a0 = GetCommandLine(frame->a0 as *mut i8, frame->a1 as usize) as u32;
+                },
+                _ => {
+                    frame->a0 = 0xFFFFFFFF;
+                }
+            }
+        },
+        _ => {}
     }
 
     frame

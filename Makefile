@@ -45,6 +45,8 @@ $(eval $(call ZODIAC_TOOL,zda,Disassembler,DISASSEMBLER))
 $(eval $(call ZODIAC_TOOL,zym,Symbols,SYMBOLS))
 $(eval $(call ZODIAC_TOOL,ztr,Strings,STRINGS))
 
+toolchain: files/zirconc files/zas files/zld files/zar files/zda files/zym files/ztr
+
 $(IMAGER): tools/Imager.zir
 	$(COMPILER) $< -o $@ -I$(ZIRCON_PATH)/include
 

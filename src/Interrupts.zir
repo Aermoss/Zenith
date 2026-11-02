@@ -86,10 +86,7 @@ fn HandleTrap(cause: TrapCause, frame: *mut Frame) -> *mut Frame {
         TrapCause::SystemCall => {
             match frame->a7 as SystemCall {
                 SystemCall::Exit => {
-                    CloseProcessFiles(current_process, true);
-                    FreeProcessAllocations(current_process);
-                    ReleaseStack(current_process);
-                    processes[current_process as usize].state = ProcessState::Free;
+                    ReleaseProcess(current_process, true);
                     return Schedule(frame);
                 },
                 SystemCall::Allocate => {

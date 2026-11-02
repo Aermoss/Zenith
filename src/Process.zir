@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir" : *]
+#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir", "src/Handles.zir" : *]
 
 type ProcessEntry = fn(u32);
 
@@ -85,6 +85,13 @@ fn ReleaseStack(id: u32) {
     }
 }
 
+fn ReleaseProcess(id: u32, save: bool) {
+    CloseProcessFiles(id, save);
+    FreeProcessAllocations(id);
+    ReleaseStack(id);
+    processes[id as usize].state = ProcessState::Free;
+}
+
 fn SetStack(id: u32, bottom: u32, size: u32) {
     let process = &mut processes[id as usize];
     process.stack_bottom = bottom;
@@ -122,8 +129,7 @@ fn SpawnWithStack(name: *i8, entry: ProcessEntry, argument: u32, mut stack_size:
     }
 
     if processes[id as usize].state == ProcessState::Crashed {
-        ReleaseStack(id);
-        processes[id as usize].state = ProcessState::Free;
+        ReleaseProcess(id, false);
     }
 
     let stack = AllocateStack(id, stack_size);
@@ -208,8 +214,7 @@ fn GetCommandLine(buffer: *mut i8, capacity: usize) -> usize {
 
 fn ExitProcess() {
     DisableInterrupts();
-    ReleaseStack(current_process);
-    processes[current_process as usize].state = ProcessState::Free;
+    ReleaseProcess(current_process, true);
     Yield();
 }
 
@@ -222,10 +227,9 @@ fn Kill(id: u32) -> bool {
     let killed = processes[id as usize].state != ProcessState::Free;
 
     if killed {
-        ReleaseStack(id);
+        ReleaseProcess(id, false);
     }
 
-    processes[id as usize].state = ProcessState::Free;
     RestoreInterrupts(interrupts);
     killed
 }

@@ -75,8 +75,6 @@ fn AllocateStack(id: u32, size: u32) -> u32 {
 }
 
 fn ReleaseStack(id: u32) {
-    FreeProcessAllocations(id);
-
     if !IsStackInBRAM(id) {
         Free(processes[id as usize].stack_bottom as *mut u8);
     }

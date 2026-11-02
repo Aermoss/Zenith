@@ -16,17 +16,6 @@
 
 #[include "std/io", "std/str", "std/vec", "std/file" : *]
 
-extern "C" {
-    fn fopen(pathname: *i8, mode: *i8) -> *mut void;
-    fn fread(ptr: *mut void, size: usize, nmemb: usize, stream: *mut void) -> usize;
-    fn fwrite(ptr: *void, size: usize, nmemb: usize, stream: *mut void) -> usize;
-    fn fseek(stream: *mut void, offset: i32, whence: i32) -> i32;
-    fn ftell(stream: *mut void) -> i32;
-    fn fclose(stream: *mut void) -> i32;
-}
-
-const SEEK_END: i32 = 2;
-
 const IMAGE_MAGIC: u32 = 0x53464E5A;
 const IMAGE_VERSION: u32 = 4;
 const BLOCK_SIZE: u32 = 4096;
@@ -67,20 +56,18 @@ fn TableChecksum(image: *u8, count: u32) -> u32 {
 }
 
 fn FileSize(path: &String) -> i32 {
-    let file = fopen(path.Data(), "rb");
-    if file == null { return -1; }
-    fseek(file, 0, SEEK_END);
-    let size = ftell(file);
-    fclose(file);
-    size
+    let mut file = File();
+    if file.Open(path, FileMode::Read).IsErr() { return -1; }
+
+    match file.Size() {
+        Result<usize, IOError>::Ok(size) => size as i32,
+        Result<usize, IOError>::Err(_) => -1
+    }
 }
 
 fn ReadInto(path: &String, destination: *mut u8, size: u32) -> bool {
-    let file = fopen(path.Data(), "rb");
-    if file == null { return false; }
-    let read = fread(destination as *mut void, 1, size as usize, file);
-    fclose(file);
-    read == size as usize
+    let mut file = File();
+    file.Open(path, FileMode::Read).IsOk() && file.ReadExact(destination, size as usize).IsOk()
 }
 
 fn IsValidName(name: &String) -> bool {
@@ -156,33 +143,26 @@ class ImageBuilder {
     }
 
     pub fn AddContents(&mut this, directory: &String, parent: u32) {
-        let mut find_data: WIN32_FIND_DATAA;
-        let handle = FindFirstFileA((directory + "\\*").Data(), &mut find_data);
+        let entries = match ListFolder(directory) {
+            Result<Vector<FolderEntry>, IOError>::Ok(entries) => entries,
+            Result<Vector<FolderEntry>, IOError>::Err(_) => {
+                return;
+            }
+        };
 
-        if handle == INVALID_HANDLE_VALUE {
-            return;
-        }
+        for entry in entries {
+            let name = entry.name;
 
-        loop {
-            let name = String(&find_data.cFileName[0] as *i8);
+            if name != "vendor" && name != "darwin" && name != "linux" && name != "windows" {
+                let path = JoinPath(directory, name);
 
-            if name != "." && name != ".." && name != "vendor" && name != "darwin" && name != "linux" && name != "windows" {
-                let path = directory + "\\" + name;
-
-                if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 {
-                    let id = this.EnsureDirectory(name, parent);
-                    this.AddContents(path, id);
+                if entry.kind == EntryKind::Folder {
+                    this.AddContents(path, this.EnsureDirectory(name, parent));
                 } else {
                     this.Add(path, name, parent, 0);
                 }
             }
-
-            if FindNextFileA(handle, &mut find_data) == 0 {
-                break;
-            }
         }
-
-        FindClose(handle);
     }
 }
 
@@ -348,15 +328,13 @@ fn Main(args: &mut Vector<String>) -> i32 {
         j += 4;
     }
 
-    let file = fopen(output.Data(), "wb");
+    let mut file = File();
 
-    if file == null {
-        WriteLine("Cannot create '" + output + "'.");
+    if file.Open(output, FileMode::Write).IsErr() || file.Write(image as *u8, total as usize).IsErr() || file.Close().IsErr() {
+        WriteLine("Cannot write '" + output + "'.");
         return 1;
     }
 
-    fwrite(image as *void, 1, total as usize, file);
-    fclose(file);
     WriteLine("Packed " + String::FromInteger(count as u64) + " entries into " + String::FromInteger(block_count as u64) + " blocks.");
     0
 }

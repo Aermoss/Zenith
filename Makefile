@@ -27,8 +27,26 @@ bin/zirconc.o: bin/zirconc.s
 files/zirconc: bin/zirconc.o
 	$(LINKER) $< -o $@ --format=exe
 
+define ZODIAC_TOOL
+bin/$(1).s: $$(wildcard $(ZODIAC_PATH)/src/$(2)/*.zir $(ZODIAC_PATH)/src/Common/*.zir $(ZIRCON_PATH)/include/std/*/*.zir)
+	$$(COMPILER) $(ZODIAC_PATH)/src/$(2)/Main.zir -o $$@ -S -target zodiac-unknown-zenith -I$(ZODIAC_PATH) -I$(ZIRCON_PATH)/include -D$(3)
+
+bin/$(1).o: bin/$(1).s
+	$$(ASSEMBLER) $$< -o $$@
+
+files/$(1): bin/$(1).o
+	$$(LINKER) $$< -o $$@ --format=exe
+endef
+
+$(eval $(call ZODIAC_TOOL,zas,Assembler,ASSEMBLER))
+$(eval $(call ZODIAC_TOOL,zld,Linker,LINKER))
+$(eval $(call ZODIAC_TOOL,zar,Archiver,ARCHIVER))
+$(eval $(call ZODIAC_TOOL,zda,Disassembler,DISASSEMBLER))
+$(eval $(call ZODIAC_TOOL,zym,Symbols,SYMBOLS))
+$(eval $(call ZODIAC_TOOL,ztr,Strings,STRINGS))
+
 $(IMAGER): tools/Imager.zir
-	$(COMPILER) $< -o $@ -I$(ZIRCON_PATH)/include -lucrt
+	$(COMPILER) $< -o $@ -I$(ZIRCON_PATH)/include
 
 bin/Files.bin: $(IMAGER) $(wildcard files/* files/*/* files/*/*/* $(ZIRCON_PATH)/include/*/*.zir $(ZIRCON_PATH)/include/*/*/*.zir $(ZIRCON_PATH)/include/*/*/*/*.zir)
 	$< files include=$(ZIRCON_PATH)/include -o $@
@@ -39,4 +57,4 @@ emulate: bin/Zenith.bin bin/Files.bin
 	$(EMULATOR) $(ZODIAC_PATH)/boot.hex --flash=bin/Zenith.bin --flash=bin/Files.bin@0x200000 --quiet
 
 clean:
-	del /Q files\zirconc src\Kernel.s bin\*
+	del /Q files\zirconc files\zas files\zld files\zar files\zda files\zym files\ztr src\Kernel.s bin\*

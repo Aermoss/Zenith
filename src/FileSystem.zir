@@ -52,6 +52,15 @@ const FILE_NOT_EMPTY: u32 = 9;
 const FILE_EXISTS: u32 = 10;
 const FILE_INTO_ITSELF: u32 = 11;
 const FILE_NO_MEMORY: u32 = 12;
+const FILE_BAD_HANDLE: u32 = 13;
+const FILE_BUSY: u32 = 14;
+const FILE_NOT_ALLOWED: u32 = 15;
+const FILE_TOO_MANY: u32 = 16;
+const FILE_BAD_POSITION: u32 = 17;
+
+const KIND_FILE: u32 = 1;
+const KIND_DIRECTORY: u32 = 2;
+const LIST_ENTRY_SIZE: u32 = 40;
 
 class TableHeader {
     pub magic: u32,
@@ -525,7 +534,7 @@ fn GetPathKind(path: *i8) -> u32 {
     if !file_system_ready { return 0; }
     LockFileSystem();
     let index = FindPath(path);
-    let kind: u32 = if index == NO_ENTRY { 0 } else if IsDirectoryIndex(index) { 2 } else { 1 };
+    let kind: u32 = if index == NO_ENTRY { 0 } else if IsDirectoryIndex(index) { KIND_DIRECTORY } else { KIND_FILE };
     UnlockFileSystem();
     kind
 }
@@ -833,7 +842,7 @@ fn MakeDirectory(path: *i8) -> u32 {
 
     if directory == NO_ENTRY {
         result = FILE_NOT_FOUND;
-    } else if !IsValidName(&name[0] as *i8) || Equals(&name[0] as *i8, ".") || Equals(&name[0] as *i8, "..") {
+    } else if !IsValidName(&name[0] as *i8) || IsReservedName(&name[0] as *i8) {
         result = FILE_BAD_NAME;
     } else if FindChild(IdOfIndex(directory), &name[0] as *i8) != NO_ENTRY {
         result = FILE_EXISTS;
@@ -848,7 +857,36 @@ fn MakeDirectory(path: *i8) -> u32 {
     result
 }
 
+fn RemoveIndex(index: u32) -> u32 {
+    let (id, parent, directory) = (GetFile(index)->id, GetFile(index)->parent, IsDirectory(GetFile(index) as *FileEntry));
+
+    if directory && HasChildren(id) {
+        return FILE_NOT_EMPTY;
+    }
+
+    RemoveEntry(index);
+    let result = CommitOrRestore();
+
+    if result == FILE_OK && current_directory == id {
+        current_directory = parent;
+    }
+
+    result
+}
+
 fn RemovePath(path: *i8) -> u32 {
+    if !file_system_ready {
+        return FILE_NO_FILE_SYSTEM;
+    }
+
+    LockFileSystem();
+    let index = FindPath(path);
+    let result = if index == NO_ENTRY || index == ROOT_ENTRY { FILE_NOT_FOUND } else { RemoveIndex(index) };
+    UnlockFileSystem();
+    result
+}
+
+fn RemoveDirectory(path: *i8) -> u32 {
     if !file_system_ready {
         return FILE_NO_FILE_SYSTEM;
     }
@@ -859,23 +897,60 @@ fn RemovePath(path: *i8) -> u32 {
 
     if index == NO_ENTRY || index == ROOT_ENTRY {
         result = FILE_NOT_FOUND;
+    } else if !IsDirectoryIndex(index) {
+        result = FILE_NOT_DIRECTORY;
     } else {
-        let (id, parent, directory) = (GetFile(index)->id, GetFile(index)->parent, IsDirectory(GetFile(index) as *FileEntry));
-
-        if directory && HasChildren(id) {
-            result = FILE_NOT_EMPTY;
-        } else {
-            RemoveEntry(index);
-            result = CommitOrRestore();
-
-            if result == FILE_OK && current_directory == id {
-                current_directory = parent;
-            }
-        }
+        result = RemoveIndex(index);
     }
 
     UnlockFileSystem();
     result
+}
+
+fn ListDirectory(path: *i8, buffer: *mut u8, capacity: u32, count: *mut u32) -> u32 {
+    if !file_system_ready {
+        return FILE_NO_FILE_SYSTEM;
+    }
+
+    LockFileSystem();
+    let index = FindPath(path);
+
+    if index == NO_ENTRY {
+        UnlockFileSystem();
+        return FILE_NOT_FOUND;
+    }
+
+    if !IsDirectoryIndex(index) {
+        UnlockFileSystem();
+        return FILE_NOT_DIRECTORY;
+    }
+
+    let directory = IdOfIndex(index);
+    let total = FileCount();
+    let mut found: u32 = 0;
+    let mut i: u32 = 0;
+
+    while i < total {
+        let file = GetFile(i);
+
+        if file->parent == directory {
+            if buffer != null && found < capacity {
+                let entry = buffer + (found * LIST_ENTRY_SIZE) as usize;
+                CopyName(entry as *mut i8, FileName(file as *FileEntry));
+                let fields = (entry + FILE_NAME_LENGTH as usize) as *mut u32;
+                fields[0] = if IsDirectory(file as *FileEntry) { KIND_DIRECTORY } else { KIND_FILE };
+                fields[1] = file->size;
+            }
+
+            found += 1;
+        }
+
+        i += 1;
+    }
+
+    *count = found;
+    UnlockFileSystem();
+    if buffer != null && found > capacity { FILE_NO_SPACE } else { FILE_OK }
 }
 
 fn FindDestination(destination: *i8, source_name: *i8, name: *mut i8) -> u32 {
@@ -905,7 +980,19 @@ fn IsInside(directory: u32, ancestor: u32) -> bool {
     ancestor == ROOT_DIRECTORY
 }
 
+fn IsReservedName(name: *i8) -> bool {
+    Equals(name, ".") || Equals(name, "..")
+}
+
 fn MovePath(source: *i8, destination: *i8) -> u32 {
+    MoveEntry(source, destination, true)
+}
+
+fn RenamePath(source: *i8, destination: *i8) -> u32 {
+    MoveEntry(source, destination, false)
+}
+
+fn MoveEntry(source: *i8, destination: *i8, into_directory: bool) -> u32 {
     if !file_system_ready {
         return FILE_NO_FILE_SYSTEM;
     }
@@ -922,11 +1009,15 @@ fn MovePath(source: *i8, destination: *i8) -> u32 {
 
     let id = GetFile(index)->id;
     let is_directory = IsDirectory(GetFile(index) as *FileEntry);
-    let directory = FindDestination(destination, FileName(GetFile(index) as *FileEntry), &mut name[0]);
+    let directory = if into_directory {
+        FindDestination(destination, FileName(GetFile(index) as *FileEntry), &mut name[0])
+    } else {
+        SplitPath(destination, &mut name[0])
+    };
 
     if directory == NO_ENTRY {
         result = FILE_NOT_FOUND;
-    } else if !IsValidName(&name[0] as *i8) {
+    } else if !IsValidName(&name[0] as *i8) || IsReservedName(&name[0] as *i8) {
         result = FILE_BAD_NAME;
     } else if is_directory && IsInside(IdOfIndex(directory), id) {
         result = FILE_INTO_ITSELF;
@@ -1060,6 +1151,16 @@ fn FileErrorMessage(error: u32) -> *i8 {
         "A directory cannot go into itself."
     } else if error == FILE_NO_MEMORY {
         "There is not enough memory."
+    } else if error == FILE_BAD_HANDLE {
+        "That is not an open file."
+    } else if error == FILE_BUSY {
+        "The file is already open for writing."
+    } else if error == FILE_NOT_ALLOWED {
+        "The file was not opened for that."
+    } else if error == FILE_TOO_MANY {
+        "There are too many open files."
+    } else if error == FILE_BAD_POSITION {
+        "That position is before the start of the file."
     } else {
         "The operation succeeded."
     }

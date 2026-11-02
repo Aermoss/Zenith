@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir", "src/Console.zir", "src/FileSystem.zir", "src/Process.zir" : *]
+#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir", "src/Console.zir", "src/FileSystem.zir", "src/Handles.zir", "src/Process.zir" : *]
 
 const INTERRUPT_TIMER: u32 = 1;
 const INTERRUPT_UART: u32 = 2;
@@ -39,6 +39,16 @@ enum SystemCall: u32 {
     RemoveFile = 9,
     Sleep = 10,
     CommandLine = 11,
+    Open = 12,
+    Close = 13,
+    Read = 14,
+    Write = 15,
+    Seek = 16,
+    Size = 17,
+    ListFolder = 18,
+    CreateFolder = 19,
+    RemoveFolder = 20,
+    Rename = 21,
     Unknown = 0xFFFFFFFF
 }
 
@@ -76,6 +86,8 @@ fn HandleTrap(cause: TrapCause, frame: *mut Frame) -> *mut Frame {
         TrapCause::SystemCall => {
             match frame->a7 as SystemCall {
                 SystemCall::Exit => {
+                    CloseProcessFiles(current_process, true);
+                    FreeProcessAllocations(current_process);
                     ReleaseStack(current_process);
                     processes[current_process as usize].state = ProcessState::Free;
                     return Schedule(frame);
@@ -125,6 +137,36 @@ fn HandleTrap(cause: TrapCause, frame: *mut Frame) -> *mut Frame {
                 },
                 SystemCall::CommandLine => {
                     frame->a0 = GetCommandLine(frame->a0 as *mut i8, frame->a1 as usize) as u32;
+                },
+                SystemCall::Open => {
+                    frame->a0 = OpenFile(frame->a0 as *i8, frame->a1, frame->a2 as *mut u32);
+                },
+                SystemCall::Close => {
+                    frame->a0 = CloseFile(frame->a0);
+                },
+                SystemCall::Read => {
+                    frame->a0 = ReadHandle(frame->a0, frame->a1 as *mut u8, frame->a2, frame->a3 as *mut u32);
+                },
+                SystemCall::Write => {
+                    frame->a0 = WriteHandle(frame->a0, frame->a1 as *u8, frame->a2);
+                },
+                SystemCall::Seek => {
+                    frame->a0 = SeekHandle(frame->a0, frame->a1 as i32, frame->a2, frame->a3 as *mut u32);
+                },
+                SystemCall::Size => {
+                    frame->a0 = GetFileSize(frame->a0, frame->a1 as *mut u32);
+                },
+                SystemCall::ListFolder => {
+                    frame->a0 = ListDirectory(frame->a0 as *i8, frame->a1 as *mut u8, frame->a2, frame->a3 as *mut u32);
+                },
+                SystemCall::CreateFolder => {
+                    frame->a0 = MakeDirectory(frame->a0 as *i8);
+                },
+                SystemCall::RemoveFolder => {
+                    frame->a0 = RemoveDirectory(frame->a0 as *i8);
+                },
+                SystemCall::Rename => {
+                    frame->a0 = RenamePath(frame->a0 as *i8, frame->a1 as *i8);
                 },
                 _ => {
                     frame->a0 = 0xFFFFFFFF;

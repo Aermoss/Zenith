@@ -1,0 +1,432 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "src/Memory.zir", "src/Trap.zir", "src/Process.zir", "src/FileSystem.zir" : *]
+
+const MAX_HANDLES: u32 = 32;
+const MINIMUM_CAPACITY: u32 = 256;
+
+const OPEN_READ: u32 = 0;
+const OPEN_WRITE: u32 = 1;
+const OPEN_APPEND: u32 = 2;
+const OPEN_UPDATE: u32 = 3;
+
+const SEEK_START: u32 = 0;
+const SEEK_CURRENT: u32 = 1;
+const SEEK_END: u32 = 2;
+
+class Handle {
+    pub used: bool,
+    pub dirty: bool,
+    pub owner: u32,
+    pub mode: u32,
+    pub id: u32,
+    pub parent: u32,
+    pub name: [i8; 32],
+    pub position: u32,
+    pub data: *mut u8,
+    pub size: u32,
+    pub capacity: u32
+}
+
+static mut handles: [Handle; 32];
+
+fn CopyBytes(destination: *mut u8, source: *u8, count: u32) {
+    let mut i: u32 = 0;
+
+    if (((destination as u32) | (source as u32)) & 3) == 0 {
+        let (to, from) = (destination as *mut u32, source as *u32);
+
+        while i < count / 4 {
+            to[i as usize] = from[i as usize];
+            i += 1;
+        }
+
+        i *= 4;
+    }
+
+    while i < count {
+        destination[i as usize] = source[i as usize];
+        i += 1;
+    }
+}
+
+fn ReserveHandle() -> u32 {
+    let interrupts = DisableInterrupts();
+    let mut slot: u32 = 0;
+
+    while slot < MAX_HANDLES && handles[slot as usize].used {
+        slot += 1;
+    }
+
+    if slot < MAX_HANDLES {
+        let handle = &mut handles[slot as usize];
+        handle.used = true;
+        handle.dirty = false;
+        handle.owner = current_process;
+        handle.mode = OPEN_READ;
+        handle.position = 0;
+        handle.data = null;
+        handle.size = 0;
+        handle.capacity = 0;
+    }
+
+    RestoreInterrupts(interrupts);
+    slot
+}
+
+fn ReleaseHandle(slot: u32) {
+    let handle = &mut handles[slot as usize];
+
+    if handle.data != null {
+        Free(handle.data);
+        handle.data = null;
+    }
+
+    handle.used = false;
+}
+
+fn IsOwnedHandle(slot: u32) -> bool {
+    slot < MAX_HANDLES && handles[slot as usize].used && handles[slot as usize].owner == current_process
+}
+
+fn IsOpenForWriting(parent: u32, name: *i8) -> bool {
+    let mut slot: u32 = 0;
+
+    while slot < MAX_HANDLES {
+        let handle = &mut handles[slot as usize];
+
+        if handle.used && handle.mode != OPEN_READ && handle.parent == parent && Equals(&handle.name[0] as *i8, name) {
+            return true;
+        }
+
+        slot += 1;
+    }
+
+    false
+}
+
+fn ReserveCapacity(slot: u32, needed: u32) -> bool {
+    let handle = &mut handles[slot as usize];
+
+    if needed <= handle.capacity {
+        return true;
+    }
+
+    let mut capacity = if handle.capacity < MINIMUM_CAPACITY { MINIMUM_CAPACITY } else { handle.capacity };
+
+    while capacity < needed {
+        capacity = if capacity >= 0x80000000 { needed } else { capacity * 2 };
+    }
+
+    let data = Allocate(capacity);
+
+    if data == null {
+        return false;
+    }
+
+    if handle.data != null {
+        CopyBytes(data, handle.data as *u8, handle.size);
+        Free(handle.data);
+    }
+
+    handle.data = data;
+    handle.capacity = capacity;
+    true
+}
+
+fn OpenForReading(slot: u32, path: *i8) -> u32 {
+    let index = FindPath(path);
+
+    if index == NO_ENTRY {
+        return FILE_NOT_FOUND;
+    }
+
+    if IsDirectoryIndex(index) {
+        return FILE_IS_DIRECTORY;
+    }
+
+    let handle = &mut handles[slot as usize];
+    handle.mode = OPEN_READ;
+    handle.id = GetFile(index)->id;
+    FILE_OK
+}
+
+fn OpenForWriting(slot: u32, path: *i8, mode: u32) -> u32 {
+    let mut name: [i8; 32];
+    let directory = SplitPath(path, &mut name[0]);
+
+    if directory == NO_ENTRY {
+        return FILE_NOT_FOUND;
+    }
+
+    let file_name = &name[0] as *i8;
+
+    if !IsValidName(file_name) || IsReservedName(file_name) {
+        return FILE_BAD_NAME;
+    }
+
+    let parent = IdOfIndex(directory);
+    let index = FindChild(parent, file_name);
+
+    if index != NO_ENTRY && IsDirectory(GetFile(index) as *FileEntry) {
+        return FILE_IS_DIRECTORY;
+    }
+
+    if index == NO_ENTRY && mode == OPEN_UPDATE {
+        return FILE_NOT_FOUND;
+    }
+
+    if IsOpenForWriting(parent, file_name) {
+        return FILE_BUSY;
+    }
+
+    let size = if index != NO_ENTRY && mode != OPEN_WRITE { GetFile(index)->size } else { 0 };
+
+    if !ReserveCapacity(slot, size) {
+        return FILE_NO_MEMORY;
+    }
+
+    let handle = &mut handles[slot as usize];
+
+    if size > 0 {
+        ReadFileData(GetFile(index) as *FileEntry, 0, handle.data, size);
+    }
+
+    CopyName(&mut handle.name[0], file_name);
+    handle.parent = parent;
+    handle.size = size;
+    handle.position = if mode == OPEN_APPEND { size } else { 0 };
+    handle.dirty = mode == OPEN_WRITE;
+    handle.mode = mode;
+    FILE_OK
+}
+
+fn OpenFile(path: *i8, mode: u32, result: *mut u32) -> u32 {
+    if mode > OPEN_UPDATE {
+        return FILE_NOT_ALLOWED;
+    }
+
+    if !file_system_ready {
+        return FILE_NO_FILE_SYSTEM;
+    }
+
+    let slot = ReserveHandle();
+
+    if slot == MAX_HANDLES {
+        return FILE_TOO_MANY;
+    }
+
+    LockFileSystem();
+    let code = if mode == OPEN_READ { OpenForReading(slot, path) } else { OpenForWriting(slot, path, mode) };
+    UnlockFileSystem();
+
+    if code == FILE_OK {
+        *result = slot;
+    } else {
+        ReleaseHandle(slot);
+    }
+
+    code
+}
+
+fn CommitHandle(slot: u32) -> u32 {
+    let handle = &mut handles[slot as usize];
+
+    if handle.mode == OPEN_READ || !handle.dirty {
+        return FILE_OK;
+    }
+
+    if !file_system_ready {
+        return FILE_NO_FILE_SYSTEM;
+    }
+
+    LockFileSystem();
+    let directory = IndexOfId(handle.parent);
+    let code = if IsDirectoryIndex(directory) { WriteFileIn(directory, &handle.name[0] as *i8, handle.data as *u8, handle.size) } else { FILE_NOT_FOUND };
+    UnlockFileSystem();
+
+    if code == FILE_OK {
+        handle.dirty = false;
+    }
+
+    code
+}
+
+fn CloseFile(slot: u32) -> u32 {
+    if !IsOwnedHandle(slot) {
+        return FILE_BAD_HANDLE;
+    }
+
+    let code = CommitHandle(slot);
+    ReleaseHandle(slot);
+    code
+}
+
+fn CloseProcessFiles(owner: u32, save: bool) {
+    let mut slot: u32 = 0;
+
+    while slot < MAX_HANDLES {
+        if handles[slot as usize].used && handles[slot as usize].owner == owner {
+            if save {
+                CommitHandle(slot);
+            }
+
+            ReleaseHandle(slot);
+        }
+
+        slot += 1;
+    }
+}
+
+fn GetFileSize(slot: u32, size: *mut u32) -> u32 {
+    if !IsOwnedHandle(slot) {
+        return FILE_BAD_HANDLE;
+    }
+
+    let handle = &mut handles[slot as usize];
+
+    if handle.mode != OPEN_READ {
+        *size = handle.size;
+        return FILE_OK;
+    }
+
+    LockFileSystem();
+    let index = IndexOfId(handle.id);
+    let found = index != NO_ENTRY && index != ROOT_ENTRY;
+
+    if found {
+        *size = GetFile(index)->size;
+    }
+
+    UnlockFileSystem();
+    if found { FILE_OK } else { FILE_NOT_FOUND }
+}
+
+fn ReadHandle(slot: u32, buffer: *mut u8, count: u32, read: *mut u32) -> u32 {
+    if !IsOwnedHandle(slot) {
+        return FILE_BAD_HANDLE;
+    }
+
+    let handle = &mut handles[slot as usize];
+
+    if handle.mode == OPEN_WRITE || handle.mode == OPEN_APPEND {
+        return FILE_NOT_ALLOWED;
+    }
+
+    let mut length: u32 = 0;
+
+    if handle.mode == OPEN_UPDATE {
+        if handle.position < handle.size {
+            length = handle.size - handle.position;
+
+            if count < length {
+                length = count;
+            }
+
+            CopyBytes(buffer, (handle.data + handle.position as usize) as *u8, length);
+        }
+    } else {
+        LockFileSystem();
+        let index = IndexOfId(handle.id);
+
+        if index == NO_ENTRY || index == ROOT_ENTRY {
+            UnlockFileSystem();
+            return FILE_NOT_FOUND;
+        }
+
+        length = ReadFileData(GetFile(index) as *FileEntry, handle.position, buffer, count);
+        UnlockFileSystem();
+    }
+
+    handle.position += length;
+    *read = length;
+    FILE_OK
+}
+
+fn WriteHandle(slot: u32, data: *u8, count: u32) -> u32 {
+    if !IsOwnedHandle(slot) {
+        return FILE_BAD_HANDLE;
+    }
+
+    let mode = handles[slot as usize].mode;
+
+    if mode == OPEN_READ {
+        return FILE_NOT_ALLOWED;
+    }
+
+    let start = if mode == OPEN_APPEND { handles[slot as usize].size } else { handles[slot as usize].position };
+
+    if count > 0xFFFFFFFF - start {
+        return FILE_NO_SPACE;
+    }
+
+    let end = start + count;
+
+    if !ReserveCapacity(slot, end) {
+        return FILE_NO_MEMORY;
+    }
+
+    let handle = &mut handles[slot as usize];
+    let mut i = handle.size;
+
+    while i < start {
+        handle.data[i as usize] = 0;
+        i += 1;
+    }
+
+    CopyBytes(handle.data + start as usize, data, count);
+
+    if end > handle.size {
+        handle.size = end;
+    }
+
+    handle.position = end;
+    handle.dirty = true;
+    FILE_OK
+}
+
+fn SeekHandle(slot: u32, offset: i32, origin: u32, position: *mut u32) -> u32 {
+    if !IsOwnedHandle(slot) {
+        return FILE_BAD_HANDLE;
+    }
+
+    if origin > SEEK_END {
+        return FILE_NOT_ALLOWED;
+    }
+
+    let mut base: u32 = 0;
+
+    if origin == SEEK_CURRENT {
+        base = handles[slot as usize].position;
+    } else if origin == SEEK_END {
+        let code = GetFileSize(slot, &mut base);
+
+        if code != FILE_OK {
+            return code;
+        }
+    }
+
+    let target = (base as i32) + offset;
+
+    if target < 0 {
+        return FILE_BAD_POSITION;
+    }
+
+    handles[slot as usize].position = target as u32;
+    *position = target as u32;
+    FILE_OK
+}

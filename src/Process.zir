@@ -32,7 +32,7 @@ const STACK_CANARY: u32 = 0x5AFE57AC;
 
 const STATUS_PREVIOUS_ENABLE: u32 = 2;
 
-class Frame {
+struct Frame {
     pub epc: u32,
     pub ra: u32, pub sp: u32, pub gp: u32, pub tp: u32, pub fp: u32,
     pub s1: u32, pub s2: u32, pub s3: u32, pub s4: u32, pub s5: u32, pub s6: u32, pub s7: u32, pub s8: u32, pub s9: u32, pub s10: u32, pub s11: u32,
@@ -45,7 +45,7 @@ enum ProcessState: u32 {
     Free, Ready, Sleeping, Waiting, Crashed
 }
 
-class Process {
+struct Process {
     pub state: ProcessState,
     pub frame: *mut Frame,
     pub wake_tick: u32,
@@ -194,7 +194,6 @@ fn SpawnImage(name: *i8, arguments: *i8, image: *mut u8, entry: u32, stack_size:
     id
 }
 
-@nomangle
 fn GetCommandLine(buffer: *mut i8, capacity: usize) -> usize {
     if buffer == null || capacity == 0 {
         return 0;

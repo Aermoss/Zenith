@@ -62,7 +62,7 @@ const KIND_FILE: u32 = 1;
 const KIND_DIRECTORY: u32 = 2;
 const LIST_ENTRY_SIZE: u32 = 40;
 
-class TableHeader {
+struct TableHeader {
     pub magic: u32,
     pub version: u32,
     pub sequence: u32,
@@ -73,7 +73,7 @@ class TableHeader {
     pub next_block: u32
 }
 
-class FileEntry {
+struct FileEntry {
     pub name: [i8; 32],
     pub first_block: u32,
     pub size: u32,

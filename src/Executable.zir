@@ -23,7 +23,7 @@ enum ExecutableError: u32 {
     None, InvalidFormat, OutOfMemory, ProcessLimitReached
 }
 
-class ExecutableHeader {
+struct ExecutableHeader {
     pub magic: u32,
     pub entry: u32,
     pub code_words: u32,

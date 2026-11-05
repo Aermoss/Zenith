@@ -28,7 +28,7 @@ const SEEK_START: u32 = 0;
 const SEEK_CURRENT: u32 = 1;
 const SEEK_END: u32 = 2;
 
-class Handle {
+struct Handle {
     pub used: bool,
     pub dirty: bool,
     pub owner: u32,

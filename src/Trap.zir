@@ -21,4 +21,5 @@ extern "C" {
     fn RestoreInterrupts(state: u32);
     fn SetInterruptMask(mask: u32);
     fn Yield();
+    fn WaitForInterrupt();
 }

@@ -29,5 +29,9 @@ fn Main(image_end: u32) {
     WriteLine("Zenith kernel started.");
     WriteLine("Type help to see the commands.");
     InitializeInterrupts();
-    loop {}
+    Yield();
+
+    loop {
+        WaitForInterrupt();
+    }
 }

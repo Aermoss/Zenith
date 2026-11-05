@@ -6,6 +6,7 @@
 .global DisableInterrupts
 .global RestoreInterrupts
 .global SetInterruptMask
+.global WaitForInterrupt
 .extern HandleTrap
 .extern Schedule
 
@@ -146,4 +147,8 @@ RestoreInterrupts:
 
 SetInterruptMask:
     csrw ienable, a0
+    br ra
+
+WaitForInterrupt:
+    wfi
     br ra

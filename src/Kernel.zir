@@ -26,7 +26,7 @@ fn Main(image_end: u32) {
     InitializeProcesses();
     Spawn("shell", RunShell, 0);
     Spawn("anim", RunAnimation, 0);
-    WriteLine("Zenith kernel started.");
+    WriteLine("Triglav kernel started.");
     WriteLine("Type help to see the commands.");
     InitializeInterrupts();
     Yield();

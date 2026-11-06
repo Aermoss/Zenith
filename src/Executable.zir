@@ -16,7 +16,7 @@
 
 #[include "src/Memory.zir", "src/Process.zir", "src/FileSystem.zir" : *]
 
-const EXECUTABLE_MAGIC: u32 = 0x4558455A;
+const EXECUTABLE_MAGIC: u32 = 0x45584553;
 const EXECUTABLE_STACK_SIZE: u32 = 256 * 1024;
 
 enum ExecutableError: u32 {

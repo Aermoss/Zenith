@@ -731,7 +731,7 @@ fn RunShell(argument: u32) {
     let mut line: [i8; LINE_LENGTH];
 
     loop {
-        Write("zenith> ");
+        Write("triglav> ");
         ReadLine(&mut line[0], LINE_LENGTH);
         AddHistory(&line[0] as *i8);
         RunCommand(&line[0] as *i8);

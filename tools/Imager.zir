@@ -16,7 +16,7 @@
 
 #[include "std/io", "std/str", "std/vec", "std/file" : *]
 
-const IMAGE_MAGIC: u32 = 0x53464E5A;
+const IMAGE_MAGIC: u32 = 0x53464754;
 const IMAGE_VERSION: u32 = 4;
 const BLOCK_SIZE: u32 = 4096;
 const TABLE_BLOCKS: u32 = 8;
@@ -167,7 +167,7 @@ class ImageBuilder {
 }
 
 fn PrintUsage(executable: String) {
-    WriteLine("OVERVIEW: Packs files and directories into a Zenith file system image");
+    WriteLine("OVERVIEW: Packs files and directories into a Triglav file system image");
     WriteLine("USAGE: " + executable + " [options] -o <image> <inputs...>");
     WriteLine("A file goes into the root directory, so does what is inside a directory.");
     WriteLine("OPTIONS:");

@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir", "src/Console.zir", "src/FileSystem.zir", "src/Handles.zir", "src/Process.zir" : *]
+#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir", "src/Console.zir", "src/FileSystem.zir", "src/Handles.zir", "src/Process.zir",
+    "src/Executable.zir" : *]
 
 const INTERRUPT_TIMER: u32 = 1;
 const INTERRUPT_UART: u32 = 2;
@@ -49,6 +50,7 @@ enum SystemCall: u32 {
     CreateFolder = 19,
     RemoveFolder = 20,
     Rename = 21,
+    Execute = 22,
     Unknown = 0xFFFFFFFF
 }
 
@@ -86,6 +88,7 @@ fn HandleTrap(cause: TrapCause, frame: *mut Frame) -> *mut Frame {
         TrapCause::SystemCall => {
             match frame->a7 as SystemCall {
                 SystemCall::Exit => {
+                    WakeJoiningProcesses(current_process, FILE_OK, frame->a0 as i32);
                     ReleaseProcess(current_process, true);
                     return Schedule(frame);
                 },
@@ -164,6 +167,18 @@ fn HandleTrap(cause: TrapCause, frame: *mut Frame) -> *mut Frame {
                 },
                 SystemCall::Rename => {
                     frame->a0 = RenamePath(frame->a0 as *i8, frame->a1 as *i8);
+                },
+                SystemCall::Execute => {
+                    let mut child = NO_PROCESS;
+                    frame->a0 = ExecuteFile(frame->a0 as *i8, frame->a1 as *i8, &mut child);
+
+                    if frame->a0 == FILE_OK {
+                        let process = &mut processes[current_process as usize];
+                        process.child = child;
+                        process.child_status = frame->a2 as *mut i32;
+                        process.state = ProcessState::Joining;
+                        return Schedule(frame);
+                    }
                 },
                 _ => {
                     frame->a0 = 0xFFFFFFFF;

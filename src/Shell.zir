@@ -291,6 +291,7 @@ fn StateName(id: u32) -> *i8 {
         ProcessState::Ready => if id == current_process { "running" } else { "ready" },
         ProcessState::Sleeping => "sleeping",
         ProcessState::Waiting => "waiting",
+        ProcessState::Joining => "joining",
         ProcessState::Crashed => "crashed"
     }
 }

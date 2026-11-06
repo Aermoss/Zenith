@@ -42,7 +42,7 @@ struct Frame {
 }
 
 enum ProcessState: u32 {
-    Free, Ready, Sleeping, Waiting, Crashed
+    Free, Ready, Sleeping, Waiting, Joining, Crashed
 }
 
 struct Process {
@@ -55,7 +55,9 @@ struct Process {
     pub arguments: [i8; 128],
     pub image: *mut u8,
     pub stack_bottom: u32,
-    pub stack_top: u32
+    pub stack_top: u32,
+    pub child: u32,
+    pub child_status: *mut i32
 }
 
 static mut processes: [Process; 16];
@@ -157,6 +159,8 @@ fn SpawnWithStack(name: *i8, entry: ProcessEntry, argument: u32, mut stack_size:
     process.ticks = 0;
     process.name = name;
     process.image = null;
+    process.child = NO_PROCESS;
+    process.child_status = null;
     process.state = ProcessState::Ready;
     RestoreInterrupts(interrupts);
     id
@@ -211,8 +215,30 @@ fn GetCommandLine(buffer: *mut i8, capacity: usize) -> usize {
     i
 }
 
+fn WakeJoiningProcesses(child: u32, error: u32, status: i32) {
+    let mut id: u32 = 1;
+
+    while id < MAX_PROCESSES {
+        let process = &mut processes[id as usize];
+
+        if process.state == ProcessState::Joining && process.child == child {
+            if error == FILE_OK && process.child_status != null {
+                *process.child_status = status;
+            }
+
+            process.frame->a0 = error;
+            process.child = NO_PROCESS;
+            process.child_status = null;
+            process.state = ProcessState::Ready;
+        }
+
+        id += 1;
+    }
+}
+
 fn ExitProcess() {
     DisableInterrupts();
+    WakeJoiningProcesses(current_process, FILE_OK, 0);
     ReleaseProcess(current_process, true);
     Yield();
 }
@@ -226,6 +252,7 @@ fn Kill(id: u32) -> bool {
     let killed = processes[id as usize].state != ProcessState::Free;
 
     if killed {
+        WakeJoiningProcesses(id, FILE_KILLED, 0);
         ReleaseProcess(id, false);
     }
 
@@ -286,8 +313,9 @@ fn SaveContext(frame: *mut Frame) {
     let process = &mut processes[current_process as usize];
     process.frame = frame;
 
-    if process.state != ProcessState::Free && *(process.stack_bottom as *u32) != STACK_CANARY {
+    if process.state != ProcessState::Free && process.state != ProcessState::Crashed && *(process.stack_bottom as *u32) != STACK_CANARY {
         process.state = ProcessState::Crashed;
+        WakeJoiningProcesses(current_process, FILE_CRASHED, 0);
     }
 }
 

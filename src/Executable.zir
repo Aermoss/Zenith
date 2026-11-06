@@ -113,3 +113,37 @@ fn SpawnExecutable(file: *FileEntry, arguments: *i8, process: *mut u32) -> Execu
     *process = id;
     ExecutableError::None
 }
+
+fn ExecuteFile(path: *i8, command_line: *i8, process: *mut u32) -> u32 {
+    if !HasFileSystem() {
+        return FILE_NO_FILE_SYSTEM;
+    }
+
+    let arguments = if command_line != null { command_line } else { path };
+    let mut length: usize = 0;
+
+    while arguments[length] != '\0' {
+        length += 1;
+
+        if length > 127 {
+            return FILE_TOO_LONG;
+        }
+    }
+
+    let file = FindFile(path);
+
+    if file == null {
+        return FILE_NOT_FOUND;
+    }
+
+    if IsDirectory(file) {
+        return FILE_IS_DIRECTORY;
+    }
+
+    match SpawnExecutable(file, arguments, process) {
+        ExecutableError::None => FILE_OK,
+        ExecutableError::InvalidFormat => FILE_NOT_EXECUTABLE,
+        ExecutableError::OutOfMemory => FILE_NO_MEMORY,
+        ExecutableError::ProcessLimitReached => FILE_NO_PROCESS
+    }
+}

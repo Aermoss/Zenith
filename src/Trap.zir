@@ -22,4 +22,7 @@ extern "C" {
     fn SetInterruptMask(mask: u32);
     fn Yield();
     fn WaitForInterrupt();
+    fn SetAddressSpace(page_table: u32, address_space: u32);
+    fn FlushTLB(caches: u32);
+    fn GetBadAddress() -> u32;
 }

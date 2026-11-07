@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir", "src/Handles.zir" : *]
+#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir", "src/Paging.zir", "src/Handles.zir" : *]
 
 type ProcessEntry = fn(u32);
 
@@ -29,8 +29,10 @@ const BRAM_STACKS: u32 = 12;
 const STACKS_END: u32 = 0x00004000;
 const STACKS_START: u32 = STACKS_END - BRAM_STACKS * STACK_SIZE;
 const STACK_CANARY: u32 = 0x5AFE57AC;
+const KERNEL_STACK_SIZE: u32 = 8192;
 
 const STATUS_PREVIOUS_ENABLE: u32 = 2;
+const STATUS_PREVIOUS_USER: u32 = 4;
 
 struct Frame {
     pub epc: u32,
@@ -42,7 +44,7 @@ struct Frame {
 }
 
 enum ProcessState: u32 {
-    Free, Ready, Sleeping, Waiting, Joining, Crashed
+    Free, Ready, Sleeping, Waiting, Joining, Crashed, Loading
 }
 
 struct Process {
@@ -57,7 +59,9 @@ struct Process {
     pub stack_bottom: u32,
     pub stack_top: u32,
     pub child: u32,
-    pub child_status: *mut i32
+    pub child_status: *mut i32,
+    pub page_table: u32,
+    pub heap_hint: u32
 }
 
 static mut processes: [Process; 16];
@@ -91,7 +95,66 @@ fn ReleaseProcess(id: u32, save: bool) {
     CloseProcessFiles(id, save);
     FreeProcessAllocations(id);
     ReleaseStack(id);
+
+    if processes[id as usize].page_table != 0 {
+        processes[id as usize].page_table = 0;
+        FlushTLB(1);
+    }
+
     processes[id as usize].state = ProcessState::Free;
+}
+
+fn ActivateProcess(id: u32) {
+    let process = &processes[id as usize];
+
+    if process.page_table != 0 {
+        SetAddressSpace(process.page_table | PTBASE_VALID, id);
+    } else {
+        SetAddressSpace(0, id);
+    }
+}
+
+fn IsUserProcess(id: u32) -> bool {
+    processes[id as usize].page_table != 0
+}
+
+fn AllocateUserMemory(id: u32, size: u32) -> u32 {
+    let process = &mut processes[id as usize];
+
+    if process.page_table == 0 {
+        return AllocateForProcess(size, id) as u32;
+    }
+
+    if size == 0 || size > USER_HEAP_END - USER_HEAP_START {
+        return 0;
+    }
+
+    let pages = (size + PAGE_MASK) / PAGE_SIZE;
+    let address = FindFreeRange(process.page_table, process.heap_hint, pages);
+
+    if address == 0 || !MapRange(id, process.page_table, address, size, PTE_WRITE) {
+        return 0;
+    }
+
+    process.heap_hint = address + (pages + 1) * PAGE_SIZE;
+    address
+}
+
+fn FreeUserMemory(id: u32, address: u32) -> bool {
+    let root = processes[id as usize].page_table;
+
+    if root == 0 {
+        return FreeForProcess(address as *mut u8, id);
+    }
+
+    let pages = AllocationPages(root, address);
+
+    if pages == 0 {
+        return false;
+    }
+
+    UnmapPages(id, root, address, pages);
+    true
 }
 
 fn SetStack(id: u32, bottom: u32, size: u32) {
@@ -151,6 +214,7 @@ fn SpawnWithStack(name: *i8, entry: ProcessEntry, argument: u32, mut stack_size:
 
     frame->epc = entry as *void as u32;
     frame->ra = ExitProcess as *void as u32;
+    frame->sp = stack + stack_size;
     frame->a0 = argument;
     frame->status = STATUS_PREVIOUS_ENABLE;
 
@@ -161,14 +225,16 @@ fn SpawnWithStack(name: *i8, entry: ProcessEntry, argument: u32, mut stack_size:
     process.image = null;
     process.child = NO_PROCESS;
     process.child_status = null;
+    process.page_table = 0;
+    process.heap_hint = USER_HEAP_START;
     process.state = ProcessState::Ready;
     RestoreInterrupts(interrupts);
     id
 }
 
-fn SpawnImage(name: *i8, arguments: *i8, image: *mut u8, entry: u32, stack_size: u32) -> u32 {
+fn SpawnUser(name: *i8, arguments: *i8, entry: u32) -> u32 {
     let interrupts = DisableInterrupts();
-    let id = SpawnWithStack(name, entry as *void as ProcessEntry, 0, stack_size);
+    let id = SpawnWithStack(name, entry as *void as ProcessEntry, 0, KERNEL_STACK_SIZE);
 
     if id != NO_PROCESS {
         let process = &mut processes[id as usize];
@@ -191,7 +257,10 @@ fn SpawnImage(name: *i8, arguments: *i8, image: *mut u8, entry: u32, stack_size:
         }
 
         process.arguments[j] = '\0';
-        process.image = image;
+        process.frame->ra = 0;
+        process.frame->sp = USER_STACK_TOP;
+        process.frame->status = STATUS_PREVIOUS_ENABLE | STATUS_PREVIOUS_USER;
+        process.state = ProcessState::Loading;
     }
 
     RestoreInterrupts(interrupts);
@@ -223,7 +292,7 @@ fn WakeJoiningProcesses(child: u32, error: u32, status: i32) {
 
         if process.state == ProcessState::Joining && process.child == child {
             if error == FILE_OK && process.child_status != null {
-                *process.child_status = status;
+                WriteProcessWord(process.page_table, process.child_status as u32, status as u32);
             }
 
             process.frame->a0 = error;
@@ -322,6 +391,7 @@ fn SaveContext(frame: *mut Frame) {
 fn SwitchTo(frame: *mut Frame, id: u32) -> *mut Frame {
     SaveContext(frame);
     current_process = id;
+    ActivateProcess(id);
     processes[id as usize].frame
 }
 
@@ -336,6 +406,7 @@ fn Schedule(frame: *mut Frame) -> *mut Frame {
 
         if id != 0 && processes[id as usize].state == ProcessState::Ready {
             current_process = id;
+            ActivateProcess(id);
             return processes[id as usize].frame;
         }
 
@@ -343,5 +414,6 @@ fn Schedule(frame: *mut Frame) -> *mut Frame {
     }
 
     current_process = 0;
+    ActivateProcess(0);
     processes[0].frame
 }

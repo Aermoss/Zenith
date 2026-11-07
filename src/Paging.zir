@@ -1,0 +1,334 @@
+/*
+ * Copyright 2022-2026 Yusuf Rençber
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#[include "src/Trap.zir", "src/Memory.zir" : *]
+
+const WINDOW_START: u32 = 0xC0000000;
+const PAGE_SIZE: u32 = 4096;
+const PAGE_MASK: u32 = 4095;
+const REGION_MASK: u32 = 0x3FFFFF;
+const ROOT_SIZE: u32 = 1024;
+
+const PTBASE_VALID: u32 = 1;
+const PTE_VALID: u32 = 1;
+const PTE_WRITE: u32 = 2;
+const PTE_EXECUTE: u32 = 4;
+const PTE_BLOCK: u32 = 8;
+const PTE_FIRST: u32 = 16;
+const PTE_LAST: u32 = 32;
+const PTE_ADDRESS: u32 = 0xFFFFF000;
+
+const USER_IMAGE_START: u32 = 0xC0000000;
+const USER_HEAP_START: u32 = 0xC1000000;
+const USER_HEAP_END: u32 = 0xFF000000;
+const USER_STACK_TOP: u32 = 0xFFF00000;
+
+fn ClearWords(memory: *mut u8, size: u32) {
+    let words = memory as *mut u32;
+    let count = size / 4;
+    let mut i: u32 = 0;
+
+    while i < count {
+        words[i as usize] = 0;
+        i += 1;
+    }
+}
+
+fn CreateAddressSpace(owner: u32) -> u32 {
+    let root = AllocateAligned(ROOT_SIZE, ROOT_SIZE, owner);
+
+    if root == null {
+        return 0;
+    }
+
+    ClearWords(root, ROOT_SIZE);
+    root as u32
+}
+
+fn RootEntry(root: u32, address: u32) -> *mut u32 {
+    (root + ((address - WINDOW_START) >> 22) * 4) as *mut u32
+}
+
+fn PageEntry(root: u32, address: u32, create: bool, owner: u32) -> *mut u32 {
+    let directory = RootEntry(root, address);
+
+    if (*directory & PTE_VALID) == 0 {
+        if !create {
+            return null;
+        }
+
+        let table = AllocateAligned(PAGE_SIZE, PAGE_SIZE, owner);
+
+        if table == null {
+            return null;
+        }
+
+        ClearWords(table, PAGE_SIZE);
+        *directory = (table as u32) | PTE_VALID;
+    }
+
+    ((*directory & PTE_ADDRESS) + (((address - WINDOW_START) >> 12) & 0x3FF) * 4) as *mut u32
+}
+
+fn IsMapped(root: u32, address: u32) -> bool {
+    let entry = PageEntry(root, address, false, 0);
+    entry != null && (*entry & PTE_VALID) != 0
+}
+
+fn Translate(root: u32, address: u32, write: bool) -> u32 {
+    if root == 0 || address < WINDOW_START {
+        return 0;
+    }
+
+    let entry = PageEntry(root, address, false, 0);
+
+    if entry == null || (*entry & PTE_VALID) == 0 || (write && (*entry & PTE_WRITE) == 0) {
+        return 0;
+    }
+
+    (*entry & PTE_ADDRESS) | (address & PAGE_MASK)
+}
+
+fn UnmapPages(owner: u32, root: u32, address: u32, count: u32) {
+    let mut i: u32 = 0;
+
+    while i < count {
+        let entry = PageEntry(root, address + i * PAGE_SIZE, false, 0);
+
+        if entry != null && (*entry & PTE_VALID) != 0 {
+            if (*entry & PTE_BLOCK) != 0 {
+                FreeForProcess((*entry & PTE_ADDRESS) as *mut u8, owner);
+            }
+
+            *entry = 0;
+        }
+
+        i += 1;
+    }
+
+    FlushTLB(0);
+}
+
+fn MapRange(owner: u32, root: u32, address: u32, size: u32, flags: u32) -> bool {
+    let pages = (size + PAGE_MASK) / PAGE_SIZE;
+
+    if pages == 0 {
+        return true;
+    }
+
+    let end = address + (pages - 1) * PAGE_SIZE;
+    let mut region = address;
+
+    loop {
+        if PageEntry(root, region, true, owner) == null {
+            return false;
+        }
+
+        let next = (region | REGION_MASK) + 1;
+
+        if next == 0 || next > end {
+            break;
+        }
+
+        region = next;
+    }
+
+    let mut mapped: u32 = 0;
+    let mut chunk = pages;
+
+    while mapped < pages {
+        if chunk > pages - mapped {
+            chunk = pages - mapped;
+        }
+
+        let memory = AllocateAligned(chunk * PAGE_SIZE, PAGE_SIZE, owner);
+
+        if memory == null {
+            if chunk > 1 {
+                chunk /= 2;
+                continue;
+            }
+
+            UnmapPages(owner, root, address, mapped);
+            return false;
+        }
+
+        ClearWords(memory, chunk * PAGE_SIZE);
+        let mut i: u32 = 0;
+
+        while i < chunk {
+            let page = mapped + i;
+            let mut value = (memory as u32 + i * PAGE_SIZE) | PTE_VALID | flags;
+
+            if i == 0 { value |= PTE_BLOCK; }
+            if page == 0 { value |= PTE_FIRST; }
+            if page == pages - 1 { value |= PTE_LAST; }
+
+            let entry = PageEntry(root, address + page * PAGE_SIZE, false, 0);
+            *entry = value;
+            i += 1;
+        }
+
+        mapped += chunk;
+    }
+
+    true
+}
+
+fn FindFreeRange(root: u32, hint: u32, pages: u32) -> u32 {
+    let total = (USER_HEAP_END - USER_HEAP_START) / PAGE_SIZE;
+    let needed = pages + 2;
+
+    if pages == 0 || needed > total {
+        return 0;
+    }
+
+    let mut address = if hint >= USER_HEAP_START && hint < USER_HEAP_END { hint & !PAGE_MASK } else { USER_HEAP_START };
+    let mut start = address;
+    let mut run: u32 = 0;
+    let mut scanned: u32 = 0;
+
+    while scanned < total + needed {
+        if address >= USER_HEAP_END {
+            address = USER_HEAP_START;
+            run = 0;
+        }
+
+        if run == 0 {
+            start = address;
+        }
+
+        let mut step: u32 = 1;
+
+        if (*RootEntry(root, address) & PTE_VALID) == 0 {
+            let region_end = (address | REGION_MASK) + 1;
+            step = ((if region_end < USER_HEAP_END { region_end } else { USER_HEAP_END }) - address) / PAGE_SIZE;
+            run += step;
+        } else if !IsMapped(root, address) {
+            run += 1;
+        } else {
+            run = 0;
+        }
+
+        if run >= needed {
+            return start + PAGE_SIZE;
+        }
+
+        address += step * PAGE_SIZE;
+        scanned += step;
+    }
+
+    0
+}
+
+fn AllocationPages(root: u32, address: u32) -> u32 {
+    if address < USER_HEAP_START || address >= USER_HEAP_END || (address & PAGE_MASK) != 0 {
+        return 0;
+    }
+
+    let first = PageEntry(root, address, false, 0);
+
+    if first == null || (*first & (PTE_VALID | PTE_FIRST)) != (PTE_VALID | PTE_FIRST) {
+        return 0;
+    }
+
+    let mut pages: u32 = 1;
+    let mut entry = first;
+
+    while (*entry & PTE_LAST) == 0 {
+        entry = PageEntry(root, address + pages * PAGE_SIZE, false, 0);
+
+        if entry == null || (*entry & PTE_VALID) == 0 {
+            return 0;
+        }
+
+        pages += 1;
+    }
+
+    pages
+}
+
+fn IsUserRange(root: u32, address: u32, length: u32, write: bool) -> bool {
+    if length == 0 {
+        return true;
+    }
+
+    if address < WINDOW_START || address + (length - 1) < address {
+        return false;
+    }
+
+    let mut page = address & !PAGE_MASK;
+    let last = (address + (length - 1)) & !PAGE_MASK;
+
+    loop {
+        if Translate(root, page, write) == 0 {
+            return false;
+        }
+
+        if page == last {
+            return true;
+        }
+
+        page += PAGE_SIZE;
+    }
+}
+
+fn IsUserString(root: u32, address: u32, limit: u32) -> bool {
+    let mut current = address;
+    let mut checked: u32 = 0;
+    let mut count: u32 = 0;
+
+    while count < limit {
+        if current < WINDOW_START {
+            return false;
+        }
+
+        let page = current & !PAGE_MASK;
+
+        if page != checked {
+            if Translate(root, page, false) == 0 {
+                return false;
+            }
+
+            checked = page;
+        }
+
+        if *(current as *i8) == '\0' {
+            return true;
+        }
+
+        current += 1;
+        count += 1;
+    }
+
+    false
+}
+
+fn WriteProcessWord(root: u32, address: u32, value: u32) -> bool {
+    if address < WINDOW_START {
+        *(address as *mut u32) = value;
+        return true;
+    }
+
+    let physical = Translate(root, address, true);
+
+    if physical == 0 || (address & 3) != 0 {
+        return false;
+    }
+
+    *(physical as *mut u32) = value;
+    true
+}

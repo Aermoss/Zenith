@@ -105,6 +105,58 @@ fn AllocateWithOwner(size: u32, owner: u32) -> *mut u8 {
     null
 }
 
+fn AllocateAligned(size: u32, alignment: u32, owner: u32) -> *mut u8 {
+    let interrupts = DisableInterrupts();
+
+    if size == 0 || size > heap_end - heap_start {
+        RestoreInterrupts(interrupts);
+        return null;
+    }
+
+    let needed = AlignUp(size, HEAP_ALIGNMENT);
+    let mut block = heap_start;
+
+    while block < heap_end {
+        let block_size = BlockSize(block);
+
+        if !BlockUsed(block) {
+            let data = block + BLOCK_HEADER_SIZE;
+            let end = data + block_size;
+            let mut start = AlignUp(data, alignment);
+
+            if start != data && start - data < BLOCK_HEADER_SIZE + HEAP_ALIGNMENT {
+                start = AlignUp(data + BLOCK_HEADER_SIZE + HEAP_ALIGNMENT, alignment);
+            }
+
+            if start < end && end - start >= needed {
+                let mut used = block;
+
+                if start != data {
+                    SetBlock(block, start - BLOCK_HEADER_SIZE - data, false, KERNEL_ALLOCATION_OWNER);
+                    used = start - BLOCK_HEADER_SIZE;
+                }
+
+                let available = end - start;
+
+                if available >= needed + BLOCK_HEADER_SIZE + HEAP_ALIGNMENT {
+                    SetBlock(start + needed, available - needed - BLOCK_HEADER_SIZE, false, KERNEL_ALLOCATION_OWNER);
+                    SetBlock(used, needed, true, owner);
+                } else {
+                    SetBlock(used, available, true, owner);
+                }
+
+                RestoreInterrupts(interrupts);
+                return start as *mut u8;
+            }
+        }
+
+        block = NextBlock(block);
+    }
+
+    RestoreInterrupts(interrupts);
+    null
+}
+
 fn Free(pointer: *mut u8) -> bool {
     FreeWithOwner(pointer, KERNEL_ALLOCATION_OWNER, false)
 }

@@ -292,7 +292,8 @@ fn StateName(id: u32) -> *i8 {
         ProcessState::Sleeping => "sleeping",
         ProcessState::Waiting => "waiting",
         ProcessState::Joining => "joining",
-        ProcessState::Crashed => "crashed"
+        ProcessState::Crashed => "crashed",
+        ProcessState::Loading => "loading"
     }
 }
 

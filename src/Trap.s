@@ -7,11 +7,29 @@
 .global RestoreInterrupts
 .global SetInterruptMask
 .global WaitForInterrupt
+.global SetAddressSpace
+.global FlushTLB
+.global GetBadAddress
 .extern HandleTrap
 .extern Schedule
 
 TrapEntry:
+    csrrw sp, scratch, sp
+    bne sp, zero, TrapFromUser
+    csrrw sp, scratch, sp
     addi sp, sp, -132
+    sw t0, 68(sp)
+    addi t0, sp, 132
+    sw t0, 8(sp)
+    b TrapSave
+
+TrapFromUser:
+    addi sp, sp, -132
+    sw t0, 68(sp)
+    csrrw t0, scratch, zero
+    sw t0, 8(sp)
+
+TrapSave:
     sw ra, 4(sp)
     sw gp, 12(sp)
     sw tp, 16(sp)
@@ -27,7 +45,6 @@ TrapEntry:
     sw s9, 56(sp)
     sw s10, 60(sp)
     sw s11, 64(sp)
-    sw t0, 68(sp)
     sw t1, 72(sp)
     sw t2, 76(sp)
     sw t3, 80(sp)
@@ -57,6 +74,12 @@ RestoreContext:
     csrw epc, t0
     lw t0, 128(sp)
     csrw status, t0
+    andi t0, t0, 4
+    beq t0, zero, RestoreRegisters
+    addi t0, sp, 132
+    csrw scratch, t0
+
+RestoreRegisters:
     lw ra, 4(sp)
     lw gp, 12(sp)
     lw tp, 16(sp)
@@ -87,7 +110,7 @@ RestoreContext:
     lw a5, 116(sp)
     lw a6, 120(sp)
     lw a7, 124(sp)
-    addi sp, sp, 132
+    lw sp, 8(sp)
     eret
 
 Yield:
@@ -97,6 +120,8 @@ Yield:
     addi sp, sp, -132
     sw ra, 0(sp)
     sw ra, 4(sp)
+    addi t1, sp, 132
+    sw t1, 8(sp)
     sw gp, 12(sp)
     sw tp, 16(sp)
     sw fp, 20(sp)
@@ -151,4 +176,17 @@ SetInterruptMask:
 
 WaitForInterrupt:
     wfi
+    br ra
+
+SetAddressSpace:
+    csrw ptbase, a0
+    csrw asid, a1
+    br ra
+
+FlushTLB:
+    csrw tlbflush, a0
+    br ra
+
+GetBadAddress:
+    csrr a0, badaddr
     br ra

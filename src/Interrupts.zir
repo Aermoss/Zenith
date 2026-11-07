@@ -14,13 +14,18 @@
  * limitations under the License.
  */
 
-#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir", "src/Console.zir", "src/FileSystem.zir", "src/Handles.zir", "src/Process.zir",
-    "src/Executable.zir" : *]
+#[include "src/Devices.zir", "src/Trap.zir", "src/Memory.zir", "src/Console.zir", "src/FileSystem.zir", "src/Handles.zir", "src/Paging.zir",
+    "src/Process.zir", "src/Executable.zir" : *]
 
 const INTERRUPT_TIMER: u32 = 1;
 const INTERRUPT_UART: u32 = 2;
 
 enum TrapCause: u32 {
+    InstructionFault = 0x00000001,
+    IllegalInstruction = 0x00000002,
+    Breakpoint = 0x00000003,
+    LoadFault = 0x00000005,
+    StoreFault = 0x00000007,
     SystemCall = 0x00000008,
     Timer = 0x80000000,
     Uart = 0x80000001,
@@ -55,6 +60,7 @@ enum SystemCall: u32 {
 }
 
 const TICK_CYCLES: u32 = CLK_FREQ / TICK_RATE;
+const USER_STRING_LIMIT: u32 = 4096;
 
 static mut next_tick: u32 = 0;
 
@@ -64,6 +70,94 @@ fn InitializeInterrupts() {
     SetTimer(next_tick);
     SetInterruptMask(INTERRUPT_TIMER | INTERRUPT_UART);
     EnableInterrupts();
+}
+
+fn FaultName(cause: TrapCause) -> *i8 {
+    match cause {
+        TrapCause::InstructionFault => "instruction fetch fault",
+        TrapCause::IllegalInstruction => "illegal instruction",
+        TrapCause::Breakpoint => "breakpoint",
+        TrapCause::LoadFault => "load fault",
+        TrapCause::StoreFault => "store fault",
+        _ => "unknown trap"
+    }
+}
+
+fn WriteFault(cause: TrapCause, frame: *Frame) {
+    Write(FaultName(cause));
+
+    if cause == TrapCause::IllegalInstruction {
+        Write(" ");
+        WriteHexadecimal(GetBadAddress());
+    } else if cause != TrapCause::Breakpoint {
+        Write(" at ");
+        WriteHexadecimal(GetBadAddress());
+    }
+
+    Write(" (pc ");
+    WriteHexadecimal(frame->epc);
+    WriteLine(").");
+}
+
+fn TerminateProcess(frame: *mut Frame) -> *mut Frame {
+    WakeJoiningProcesses(current_process, FILE_CRASHED, 0);
+    ReleaseProcess(current_process, false);
+    Schedule(frame)
+}
+
+fn RejectCall(frame: *mut Frame) -> *mut Frame {
+    Write(processes[current_process as usize].name);
+    Write(" crashed: invalid pointer passed to system call ");
+    WriteInteger(frame->a7);
+    WriteLine(".");
+    TerminateProcess(frame)
+}
+
+fn UserRoot() -> u32 {
+    processes[current_process as usize].page_table
+}
+
+fn UserBuffer(address: u32, length: u32, write: bool) -> bool {
+    !IsUserProcess(current_process) || IsUserRange(UserRoot(), address, length, write)
+}
+
+fn UserBufferOrNull(address: u32, length: u32, write: bool) -> bool {
+    address == 0 || UserBuffer(address, length, write)
+}
+
+fn UserWord(address: u32) -> bool {
+    UserBuffer(address, 4, true)
+}
+
+fn UserString(address: u32) -> bool {
+    !IsUserProcess(current_process) || IsUserString(UserRoot(), address, USER_STRING_LIMIT)
+}
+
+fn UserStringOrNull(address: u32) -> bool {
+    address == 0 || UserString(address)
+}
+
+fn ValidateCall(call: SystemCall, frame: *Frame) -> bool {
+    let (a0, a1, a2, a3) = (frame->a0, frame->a1, frame->a2, frame->a3);
+
+    match call {
+        SystemCall::ConsoleRead => a0 == 0 || a1 == 0 || UserBuffer(a0, 1, true),
+        SystemCall::ConsoleWrite => UserBuffer(a0, a1, false),
+        SystemCall::PathKind | SystemCall::RemoveFile | SystemCall::CreateFolder | SystemCall::RemoveFolder => UserString(a0),
+        SystemCall::CanonicalPath => UserString(a0) && UserBuffer(a1, a2, true),
+        SystemCall::ReadFile => UserString(a0) && UserBufferOrNull(a1, a2, true) && UserWord(a3),
+        SystemCall::WriteFile => UserString(a0) && UserBuffer(a1, a2, false),
+        SystemCall::CommandLine => UserBufferOrNull(a0, a1, true),
+        SystemCall::Open => UserString(a0) && UserWord(a2),
+        SystemCall::Read => UserBuffer(a1, a2, true) && UserWord(a3),
+        SystemCall::Write => UserBuffer(a1, a2, false),
+        SystemCall::Seek => UserWord(a3),
+        SystemCall::Size => UserWord(a1),
+        SystemCall::ListFolder => UserString(a0) && UserBufferOrNull(a1, (if a2 < MAX_FILES { a2 } else { MAX_FILES }) * LIST_ENTRY_SIZE, true) && UserWord(a3),
+        SystemCall::Rename => UserString(a0) && UserString(a1),
+        SystemCall::Execute => UserString(a0) && UserStringOrNull(a1) && UserBufferOrNull(a2, 4, true),
+        _ => true
+    }
 }
 
 @nomangle
@@ -85,18 +179,36 @@ fn HandleTrap(cause: TrapCause, frame: *mut Frame) -> *mut Frame {
                 return SwitchTo(frame, woken);
             }
         },
+        TrapCause::InstructionFault | TrapCause::IllegalInstruction | TrapCause::Breakpoint | TrapCause::LoadFault | TrapCause::StoreFault => {
+            if (frame->status & STATUS_PREVIOUS_USER) == 0 {
+                Write("Kernel ");
+                WriteFault(cause, frame);
+                loop {}
+            }
+
+            Write(processes[current_process as usize].name);
+            Write(" crashed: ");
+            WriteFault(cause, frame);
+            return TerminateProcess(frame);
+        },
         TrapCause::SystemCall => {
-            match frame->a7 as SystemCall {
+            let call = frame->a7 as SystemCall;
+
+            if !ValidateCall(call, frame) {
+                return RejectCall(frame);
+            }
+
+            match call {
                 SystemCall::Exit => {
                     WakeJoiningProcesses(current_process, FILE_OK, frame->a0 as i32);
                     ReleaseProcess(current_process, true);
                     return Schedule(frame);
                 },
                 SystemCall::Allocate => {
-                    frame->a0 = AllocateForProcess(frame->a0, current_process) as u32;
+                    frame->a0 = AllocateUserMemory(current_process, frame->a0);
                 },
                 SystemCall::Free => {
-                    FreeForProcess(frame->a0 as *mut u8, current_process);
+                    FreeUserMemory(current_process, frame->a0);
                 },
                 SystemCall::ConsoleRead => {
                     if frame->a0 == 0 || frame->a1 == 0 {

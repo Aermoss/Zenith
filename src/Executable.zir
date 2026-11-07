@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#[include "src/Memory.zir", "src/Process.zir", "src/FileSystem.zir" : *]
+#[include "src/Memory.zir", "src/Paging.zir", "src/Process.zir", "src/FileSystem.zir" : *]
 
 const EXECUTABLE_MAGIC: u32 = 0x45584553;
 const EXECUTABLE_STACK_SIZE: u32 = 256 * 1024;
@@ -55,62 +55,90 @@ fn SpawnExecutable(file: *FileEntry, arguments: *i8, process: *mut u32) -> Execu
 
     let code_size = header.code_words * 4;
 
-    if header.entry >= code_size || (header.entry & 3) != 0 {
+    if header.entry >= code_size || (header.entry & 3) != 0 || code_size > USER_HEAP_START - USER_IMAGE_START {
         return ExecutableError::InvalidFormat;
     }
 
-    let image = Allocate(code_size);
+    let interrupts = DisableInterrupts();
+    let id = SpawnUser(FileName(file), arguments, USER_IMAGE_START + header.entry);
 
-    if image == null {
+    if id == NO_PROCESS {
+        RestoreInterrupts(interrupts);
+        return ExecutableError::ProcessLimitReached;
+    }
+
+    let error = LoadImage(id, file, &header);
+
+    if error != ExecutableError::None {
+        ReleaseProcess(id, false);
+        RestoreInterrupts(interrupts);
+        return error;
+    }
+
+    processes[id as usize].state = ProcessState::Ready;
+    RestoreInterrupts(interrupts);
+    *process = id;
+    ExecutableError::None
+}
+
+fn LoadImage(id: u32, file: *FileEntry, header: *ExecutableHeader) -> ExecutableError {
+    let header_size = sizeof(ExecutableHeader) as u32;
+    let code_size = header->code_words * 4;
+    let root = CreateAddressSpace(id);
+
+    if root == 0 {
         return ExecutableError::OutOfMemory;
     }
 
-    if ReadFile(file, header_size, image, code_size) != code_size {
-        Free(image);
-        return ExecutableError::InvalidFormat;
+    processes[id as usize].page_table = root;
+
+    if !MapRange(id, root, USER_IMAGE_START, code_size, PTE_WRITE | PTE_EXECUTE) || !MapRange(id, root, USER_STACK_TOP - EXECUTABLE_STACK_SIZE, EXECUTABLE_STACK_SIZE, PTE_WRITE) {
+        return ExecutableError::OutOfMemory;
     }
 
-    let base = image as u32;
+    let mut offset: u32 = 0;
+
+    while offset < code_size {
+        let count = if code_size - offset < PAGE_SIZE { code_size - offset } else { PAGE_SIZE };
+        let page = Translate(root, USER_IMAGE_START + offset, true) as *mut u8;
+
+        if ReadFile(file, header_size + offset, page, count) != count {
+            return ExecutableError::InvalidFormat;
+        }
+
+        offset += count;
+    }
+
     let relocation_start = header_size + code_size;
     let mut batch: [u32; 64];
     let mut i: u32 = 0;
 
-    while i < header.relocation_count {
-        let remaining = header.relocation_count - i;
+    while i < header->relocation_count {
+        let remaining = header->relocation_count - i;
         let count = if remaining < 64 { remaining } else { 64 };
         let bytes = count * 4;
 
         if ReadFile(file, relocation_start + i * 4, &mut batch[0] as *mut u8, bytes) != bytes {
-            Free(image);
             return ExecutableError::InvalidFormat;
         }
 
         let mut j: u32 = 0;
 
         while j < count {
-            let offset = batch[j as usize];
+            let target = batch[j as usize];
 
-            if offset >= code_size || (offset & 3) != 0 {
-                Free(image);
+            if target >= code_size || (target & 3) != 0 {
                 return ExecutableError::InvalidFormat;
             }
 
-            let target = (image + offset as usize) as *mut u32;
-            *target += base;
+            let word = Translate(root, USER_IMAGE_START + target, true) as *mut u32;
+            *word += USER_IMAGE_START;
             j += 1;
         }
 
         i += count;
     }
 
-    let id = SpawnImage(FileName(file), arguments, image, base + header.entry, EXECUTABLE_STACK_SIZE);
-
-    if id == NO_PROCESS {
-        Free(image);
-        return ExecutableError::ProcessLimitReached;
-    }
-
-    *process = id;
     ExecutableError::None
 }
 
